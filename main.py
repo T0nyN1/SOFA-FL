@@ -78,6 +78,8 @@ def main():
     logger.info(f'Using device: {device}')
 
     dataset_func, n_classes = get_dataset(cfg['train']['dataset'])
+    if not os.path.exists(args.dataset_dir):
+        os.mkdir(args.dataset_dir)
     train_set, test_set = dataset_func(args.dataset_dir)
     logger.info(
         f'Dataset loaded! Using dataset: {dataset_func.__name__} | n_classes: {n_classes} | n_train: {len(train_set)} | n_test: {len(test_set)}')
