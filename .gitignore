@@ -1,0 +1,101 @@
+# ===============================
+# Python
+# ===============================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+venv/
+env/
+.venv/
+ENV/
+
+# ===============================
+# IDE / Editor
+# ===============================
+
+# PyCharm
+.idea/
+*.iml
+
+# VSCode
+.vscode/
+
+# Jupyter
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+
+# ===============================
+# OS generated files
+# ===============================
+.DS_Store
+Desktop.ini
+Thumbs.db
+
+# ===============================
+# Dataset files
+# ===============================
+dataset/
+
+# ===============================
+# Training outputs
+# ===============================
+runs/
+
+# ===============================
+# Model files / checkpoints
+# ===============================
+*.pth
+*.pt
+*.ckpt
+*.pkl
+*.pickle
+checkpoints/
+models/
+model/
+
+# ===============================
+# Logs
+# ===============================
+logs/
+*.log
+tensorboard/
+lightning_logs/
+wandb/
+
+# ===============================
+# Cache / temporary files
+# ===============================
+*.tmp
+*.temp
+*.cache
+.cache/
+tmp/
+temp/
+
+# Torch multiprocessing shared memory
+*.shm
+*.shared
+*.dat
+
+# ===============================
+# Config backup
+# ===============================
+*.yaml.backup
+config.yaml.backup
+
+# ===============================
+# Secrets (if any)
+# ===============================
+*.key
+*.pem
+token.txt
+
+# ===============================
+# Misc
+# ===============================
+*.bak
+*.orig

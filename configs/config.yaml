@@ -1,0 +1,39 @@
+# ========================
+# |----SOFA-FL Config----|
+# ========================
+
+experiment:
+  seed: 42
+  device: 'auto'
+  parallel_training: true
+  num_workers: 4
+
+train:
+  model: 'convnet'
+  dataset: 'mnist'
+  optimizer: 'adam'
+  local_objective: "cross_entropy"
+  alpha: 0.2
+  beta: 0.2
+
+server:
+  n_clients: 20
+  comm_rounds: 20
+  cluster_type: 'dmac'
+  distance_metric: 'euclidean'
+  threshold: 0.03
+  increment_factor: 1.1
+  scheme:
+    iters_before_first_clustering: null
+
+client:
+  lr: 0.001
+  weight_decay: 0.0001
+  batch_size: 100
+  local_updates: 5
+  max_iters: null
+
+data:
+  iid: false
+  alpha: 1
+  in_channels: 784
