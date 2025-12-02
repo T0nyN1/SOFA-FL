@@ -1,9 +1,10 @@
 import copy
-from typing import Union
+from typing import Union, List
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset
+from lightning.pytorch.utilities.combined_loader import CombinedLoader
 
 from core.clustering import Hierarchical_Clustering, SHAPE
 from core.managers import Train_Manager, Evaluation_Manager
@@ -12,6 +13,7 @@ from utils.dataset import partition_dataset
 
 def train_client(model, train_loader, siblings, predecessor, optimizer, criterion, max_iters=None, device='cpu'):
     losses = []
+    local_losses = []
 
     model.train()
     for i, (inputs, targets) in enumerate(train_loader):
@@ -20,22 +22,29 @@ def train_client(model, train_loader, siblings, predecessor, optimizer, criterio
         inputs, targets = inputs.to(device), targets.to(device)
         with torch.set_grad_enabled(True):
             outputs = model(inputs)
-            loss = criterion(outputs, targets, model, siblings, predecessor)
+            local_loss, inter_loss, intra_loss = criterion(outputs, targets, model, siblings, predecessor)
+            loss = local_loss + inter_loss + intra_loss
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
         losses.append(loss.item())
-    return np.mean(losses).item()
+        local_losses.append(local_loss.item())
+    return np.mean(losses).item(), np.mean(local_losses).item()
 
 
 def eval_client(model, test_loader, device='cpu'):
     model.eval()
     total_err = 0
     total_counts = 0
+    for batch in test_loader:
+        # FIXME: a little bit unsafe, more strict condition in future
+        if len(batch) == 3:
+            inputs, targets = batch[0]
+        elif len(batch) == 2:
+            inputs, targets = batch
 
-    for inputs, targets in test_loader:
         inputs, targets = inputs.to(device), targets.to(device)
         with torch.set_grad_enabled(False):
             outputs = model(inputs)
@@ -81,16 +90,18 @@ class SOFA_FL_Client:
 
     def local_update(self, criterion, siblings, predecessor):
         losses = []
+        local_losses = []
         if self.local_updates is None:
             return
         for i in range(self.local_updates):
-            loss = train_client(self.model, self.train_loader, siblings, predecessor,
-                                optimizer=self.optimizer,
-                                criterion=criterion,
-                                max_iters=self.max_iters,
-                                device=self.device)
+            loss, local_loss = train_client(self.model, self.train_loader, siblings, predecessor,
+                                            optimizer=self.optimizer,
+                                            criterion=criterion,
+                                            max_iters=self.max_iters,
+                                            device=self.device)
             losses.append(loss)
-        return self.id, losses
+            local_losses.append(local_loss)
+        return self.id, losses, local_losses
 
     def evaluate(self):
         acccuracy = eval_client(self.model, self.test_loader, self.device)
@@ -118,19 +129,38 @@ class SOFA_FL_Server:
         self.device = torch.device(cfg['experiment']['device'])
         self.logger = logger
 
-        Y = np.array(train_set.targets)
+        Y_train = np.array(train_set.targets)
+        Y_test = np.array(test_set.targets)
         if n_clients == 1:
             clients_train_loaders = [DataLoader(dataset=train_set, batch_size=self.batch_size, shuffle=True)]
-            clients_test_loader = DataLoader(dataset=test_set, batch_size=self.batch_size, shuffle=False)
-            distribution_info = ""
+            clients_test_loader = [DataLoader(dataset=test_set, batch_size=self.batch_size, shuffle=False)]
+            train_distribution, test_distribution = "", ""
         else:
-            clients_datasets, distribution_info = partition_dataset(train_set, Y, n_classes, n_clients,
-                                                                    alpha=self.alpha, seed=self.seed)
+            clients_datasets, class_allocation, train_distribution = partition_dataset(
+                train_set, Y_train,
+                n_classes=n_classes,
+                n_clients=n_clients,
+                alpha=self.alpha,
+                seed=self.seed
+            )
+            clients_test_datasets, _, test_distribution = partition_dataset(
+                test_set, Y_test,
+                n_classes=n_classes,
+                n_clients=n_clients,
+                alpha=self.alpha,
+                seed=self.seed,
+                class_allocation=class_allocation
+            )
             clients_train_loaders = [DataLoader(client_dataset, batch_size=self.batch_size, shuffle=True) for
-                                     client_dataset
-                                     in clients_datasets]
-            clients_test_loader = DataLoader(test_set, batch_size=self.batch_size, shuffle=False)
-        self.logger.info("Dataset has been partitioned and assigned to clients." + distribution_info)
+                                     client_dataset in clients_datasets]
+            # FIXME: DELETE after completion of implementation.
+            # clients_test_loader = DataLoader(test_set, batch_size=self.batch_size, shuffle=False)
+            clients_test_loaders = [DataLoader(d, batch_size=self.batch_size, shuffle=False) for d in
+                                    clients_test_datasets]
+
+        self.logger.info("Dataset has been partitioned and assigned to clients.")
+        self.logger.info("Train " + train_distribution)
+        self.logger.info("Test " + test_distribution)
 
         if isinstance(self.local_updates, int):
             self.local_updates = [self.local_updates] * self.n_clients
@@ -150,15 +180,15 @@ class SOFA_FL_Server:
         self.clients = [
             SOFA_FL_Client(i, model,
                            train_loader,
-                           clients_test_loader,
+                           test_loader,
                            optimizer,
                            lr=self.cfg['client']['lr'],
                            weight_decay=self.cfg['client']['weight_decay'],
                            local_updates=local_updates,
                            max_iters=max_iters,
                            device=self.device)
-            for i, (train_loader, local_updates, max_iters) in
-            enumerate(zip(clients_train_loaders, self.local_updates, self.max_iters))]
+            for i, (train_loader, test_loader, local_updates, max_iters) in
+            enumerate(zip(clients_train_loaders, clients_test_loaders, self.local_updates, self.max_iters))]
         self.logger.info(f"Clients initialized. Number of clients: {len(self.clients)}")
 
         self.clients_dict = {}
@@ -226,11 +256,22 @@ class SOFA_FL_Server:
         model = copy.deepcopy(client.model)
         return model
 
-    def _update_ws(self, clients):
+    def _update_ws(self, clients: List[SOFA_FL_Client]):
         samples = [client.samples() for client in clients]
         total_sampels = sum(samples)
         for client in clients:
             client.w = client.samples() / total_sampels
+
+    def _update_test_data(self, client: SOFA_FL_Client, successors: List[SOFA_FL_Client]):
+        test_loaders = []
+        for s in successors:
+            test_loader = s.test_loader
+            if isinstance(test_loader, CombinedLoader):
+                test_loaders.extend(test_loader._iterables)
+            else:
+                test_loaders.append(test_loader)
+        combined_test_loader = CombinedLoader(test_loaders, mode="sequential")
+        client.test_loader = combined_test_loader
 
     def update_clients(self):
         if self.shape.log is None:
@@ -240,8 +281,16 @@ class SOFA_FL_Server:
                 successor_clients = [self.clients[id] for id in successors_indices]
                 self._update_ws(successor_clients)
                 self.clients.append(
-                    SOFA_FL_Client(node.index, self.aggregate_weights(successor_clients), node.samples,
-                                   self.clients[0].test_loader, None, 0, 0, None, None, self.device))
+                    SOFA_FL_Client(node.index,
+                                   model=self.aggregate_weights(successor_clients),
+                                   train_loader=node.samples,
+                                   test_loader=None,
+                                   optimizer=None,
+                                   lr=0,
+                                   weight_decay=0,
+                                   local_updates=None,
+                                   max_iters=None,
+                                   device=self.device))
             self.update_clients_dict()
         else:
             for node in self.shape.log.keys():
@@ -254,13 +303,20 @@ class SOFA_FL_Server:
                 elif len(self.shape.log[node]) == 1:
                     client = self.node_to_client(self.shape.log[node][0])
                     weights = self.copy_weights(client)
-                    # TODO: unprotected
                     samples = sum([n.samples for n in node.successors])
 
                 if weights is not None:
                     self.clients.append(
-                        SOFA_FL_Client(node.index, weights, samples, self.clients[0].test_loader, None, 0, 0, None,
-                                       None, self.device))
+                        SOFA_FL_Client(node.index,
+                                       model=weights,
+                                       train_loader=samples,
+                                       test_loader=None,
+                                       optimizer=None,
+                                       lr=0,
+                                       weight_decay=0,
+                                       local_updates=None,
+                                       max_iters=None,
+                                       device=self.device))
                     self.update_clients_dict()
 
             for node in self.shape.log.keys():
@@ -276,6 +332,7 @@ class SOFA_FL_Server:
                 successors = node.successors
                 successors_clients = [self.node_to_client(s) for s in successors]
                 self._update_ws(successors_clients)
+                self._update_test_data(self.node_to_client(node), successors_clients)
 
     def sync_client_weights(self, client):
         node = self.client_to_node(client)

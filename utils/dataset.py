@@ -42,7 +42,7 @@ def cifar100_datasets(data_dir='dataset'):
     test_set = torchvision.datasets.CIFAR100(root=data_dir, train=False, download=True, transform=transform)
     return train_set, test_set
 
-def partition_dataset(dataset, Y, n_classes, n_clients, alpha, seed):
+def partition_dataset(dataset, Y, n_classes, n_clients, alpha, seed, class_allocation=None):
     """
     Partitions a dataset into subsets for multiple clients, supporting both IID and non-IID cases.
 
@@ -63,6 +63,7 @@ def partition_dataset(dataset, Y, n_classes, n_clients, alpha, seed):
     clients = []
 
     # IID Case
+    # TODO: class_allocation handling
     if alpha == -1:
         torch.manual_seed(seed)
         num_samples = len(dataset)
@@ -79,9 +80,15 @@ def partition_dataset(dataset, Y, n_classes, n_clients, alpha, seed):
         indices = [np.where(Y == class_id)[0] for class_id in range(n_classes)]
         for i in range(len(indices)):
             np.random.shuffle(indices[i])
+        if class_allocation is None:
+            class_allocation = []
+            for class_id in range(n_classes):
+                allocation = np.random.dirichlet([alpha] * n_clients)
+                class_allocation.append(allocation)
+
         client_indices = [[] for _ in range(n_clients)]
         for class_id in range(n_classes):
-            allocation = np.random.dirichlet([alpha] * n_clients) * len(indices[class_id])
+            allocation = class_allocation[class_id] * len(indices[class_id])
             allocation = allocation.astype(int)
             allocation[np.argmax(allocation)] += len(indices[class_id]) - allocation.sum()
             start_index = 0
@@ -91,7 +98,7 @@ def partition_dataset(dataset, Y, n_classes, n_clients, alpha, seed):
         clients = [torch.utils.data.Subset(dataset, np.random.permutation(item)) for item in client_indices]
 
     distribution = _classes_distributions_info(clients, Y)
-    return clients, distribution
+    return clients, class_allocation, distribution
 
 
 def _classes_distributions_info(clients, Y):

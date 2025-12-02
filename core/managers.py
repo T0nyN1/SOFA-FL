@@ -5,10 +5,10 @@ import torch
 import torch.nn.functional as F
 import torch.multiprocessing as mp
 from tqdm import tqdm
-from functools import partial
 
 from core.loss import SOFA_FL_Loss
 
+# TODO: train progress log, currently unimplemented.
 
 class Base_Manager():
     def __init__(self, server, logger):
@@ -46,13 +46,15 @@ class Base_Manager():
 
     def train_one_round(self):
         losses = {}
+        local_losses = {}
         for client in tqdm(self.server.clients[:self.server.n_clients],
                            desc=f"Round {self.round} | Clients local updating: "):
 
-            id, loss = client.local_update(*self._instantiate_criterion(client))
+            id, loss, local_loss = client.local_update(*self._instantiate_criterion(client))
             self.server.sync_client_weights(client)
             losses[id] = loss
-        return losses
+            local_losses[id] = local_loss
+        return losses, local_losses
 
     # TODO: cuda support
     @staticmethod
@@ -65,11 +67,11 @@ class Base_Manager():
         siblings_clients = [w.to(device) for w in siblings_clients] if siblings_clients is not None else None
         predecessor_client = predecessor_client.to(device) if predecessor_client is not None else None
 
-        client_id, loss = client.local_update(criterion, siblings_clients, predecessor_client)
+        client_id, loss, local_loss = client.local_update(criterion, siblings_clients, predecessor_client)
 
         updated_weights = {k: v.cpu() for k, v in client.model.state_dict().items()}
 
-        return client_id, loss, updated_weights
+        return client_id, loss, local_loss, updated_weights
 
     def train_one_round_parallel(self):
         MAX_WORKERS = self.server.cfg['experiment']['num_workers']
@@ -88,6 +90,7 @@ class Base_Manager():
             tasks.append((client, str(self.server.device), *self._instantiate_criterion(client, device='cpu')))
 
         losses = {}
+        local_losses = {}
 
         try:
             mp.set_start_method('spawn', force=True)
@@ -95,38 +98,29 @@ class Base_Manager():
             pass
 
         with mp.Pool(processes=MAX_WORKERS) as pool:
-            # worker_fn = partial(
-            #     self._client_update_task,
-            #     instantiate_criterion=self._instantiate_criterion
-            # )
-            # results = list(tqdm(
-            #     pool.imap(worker_fn, tasks),
-            #     total=len(tasks),
-            #     desc=f"Round {self.round + 1} | Parallel Updating"
-            # ))
-
             results = list(tqdm(
                 pool.imap(self._client_update_task, tasks),
                 total=len(tasks),
                 desc=f"Round {self.round} | Parallel Updating"
             ))
 
-        for client_id, loss, new_weights in results:
+        for client_id, loss, local_loss, new_weights in results:
             losses[client_id] = loss
+            local_losses[client_id] = local_loss
             target_client = next((c for c in self.server.clients if c.id == client_id), None)
             if target_client:
                 target_client.model.load_state_dict(new_weights)
                 target_client.model.to(self.server.device)  # sent back to gpu, if needed
                 self.server.sync_client_weights(target_client)
 
-        return losses
+        return losses, local_losses
 
     def _next_round(self):
         if self.parallel:
-            clients_losses = self.train_one_round_parallel()
+            clients_losses, local_losses = self.train_one_round_parallel()
         else:
-            clients_losses = self.train_one_round()
-        return clients_losses
+            clients_losses, local_losses = self.train_one_round()
+        return clients_losses, local_losses
 
     def _init_clustering(self):
         self.server.architecture.fit()
@@ -186,7 +180,6 @@ class Base_Manager():
             pass
 
         with mp.Pool(processes=MAX_WORKERS) as pool:
-            # 调用全局函数
             results = list(tqdm(
                 pool.imap(self._eval_task, tasks),
                 total=len(tasks),
@@ -211,27 +204,32 @@ class Train_Manager(Base_Manager):
         super().__init__(server, logger)
         self.vis = visualize
         self.val = val
-        self.stats = {"train_losses": [], "val_accuracies": []}
+        self.stats = {"train_losses": [], "val_accuracies": [], "local_losses":[]}
 
     def _update_stats(self, key, values):
         self.stats[key].append(values)
 
     def _warm_up(self):
         # Warm-up before first clustering
-        warmup_iters = self.server.cfg['server']['scheme']['iters_before_first_clustering']
+        # FIXME: Bug exists. Fail to work.
+        warmup_iters = self.server.cfg['server']['scheme']['rounds_before_first_clustering']
         if warmup_iters is None:
             warmup_iters = 1
             for _ in range(warmup_iters):
-                self._next_round()
+                clients_losses, local_losses = self._next_round()
+                self._update_stats("train_losses", clients_losses)
+                self._update_stats("local_losses", local_losses)
 
     def step(self):
         self.round += 1
-        clients_losses = self._next_round()
+        clients_losses, local_losses = self._next_round()
 
         self._update_stats("train_losses", clients_losses)
+        self._update_stats("local_losses", local_losses)
         self._update_clustering()
-        # if self.vis:
-        #     self.server.architecture.visualize_tree(save_plot=False)
+        # Uncomment if visualizing complete clustering process.
+        if self.vis:
+            self.server.architecture.visualize_tree(name=f"Dendrogram_round_{self.round}")
         if self.val:
             accuracies = self.evaluate()
             self._update_stats("val_accuracies", accuracies)
@@ -245,17 +243,16 @@ class Train_Manager(Base_Manager):
             self._update_stats("val_accuracies", accuracies)
         self.logger.info("Forming server architecture...")
         self._init_clustering()
-        # if self.vis:
-        #     self.server.architecture.visualize_tree(save_plot=False)
+        # Uncomment if visualizing complete clustering process.
+        if self.vis:
+            self.server.architecture.visualize_tree(name=f"Dendrogram_round_{self.round}")
         for i in range(self.server.comm_rounds - 1):
             self.step()
         if self.vis:
             self.visualize(arch=True, save_plot=True)
         return self.stats
 
-    def visualize_train_losses(self, save_plot=True, name="train_losses"):
-        train_losses_data = self.stats["train_losses"]
-
+    def visualize_train_losses(self, train_losses_data, save_plot=True, name="train_losses"):
         if not train_losses_data:
             print("No training loss data to visualize.")
             return
@@ -465,7 +462,8 @@ class Train_Manager(Base_Manager):
     def visualize(self, arch=False, save_plot=True):
         if arch:
             self.server.architecture.visualize_tree(save_plot=save_plot)
-        self.visualize_train_losses(save_plot=save_plot)
+        self.visualize_train_losses(self.stats["train_losses"], save_plot=save_plot)
+        self.visualize_train_losses(self.stats["local_losses"], save_plot=save_plot, name="local_losses")
         if self.val:
             self.visualize_val_accuracy(save_plot=save_plot)
 

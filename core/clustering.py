@@ -465,7 +465,7 @@ class SHAPE:
             nodes = self.tree._find_nodes_of_level(l)
             nodes_centroids = torch.stack([n.centroid for n in nodes]).to(self.tree.device)
             parents = self.tree._find_nodes_of_level(l + 1)
-            # DEBUG
+            # DEBUG: good luck!
             try:
                 parents_centroids = torch.stack([n.centroid for n in parents]).to(self.tree.device)
             except RuntimeError:
