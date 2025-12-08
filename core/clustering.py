@@ -16,7 +16,7 @@ from utils.utility import euclidean_distance, manhattan_distance, union_find_gro
 
 
 class Cluster_Node:
-    def __init__(self, index, successors=None, level=0, centroid=None, samples=0):
+    def __init__(self, index, successors=[], level=0, centroid=None, samples=0):
         self.index = index
         self.successors = successors
         self.level = level
@@ -24,7 +24,7 @@ class Cluster_Node:
         self.samples = samples
 
     def is_leaf(self):
-        return self.successors is None
+        return len(self.successors) == 0
 
     def get_leaves(self):
         if self.is_leaf():
@@ -356,12 +356,30 @@ class Hierarchical_Clustering:
 class SHAPE:
     '''implements the Self-organizing Hierarchical Adaptive Propagation and Evolution (SHAPE) algorithm'''
 
-    def __init__(self, tree: Hierarchical_Clustering, graft_tolerance=0.1, split_threshold=0.5, merge_threshold=0.5):
+    def __init__(self, tree: Hierarchical_Clustering, graft_tolerance=0.1, split_threshold=0.5, merge_threshold=0.5, max_splits=3):
         self.tree: Hierarchical_Clustering = tree
         self.split_threshold = split_threshold
         self.graft_tolerance = graft_tolerance
         self.merge_threshold = merge_threshold
+        self.max_splits = max_splits
         self.log: dict = None
+
+    def find_lowest_common_ancestor(self, root, node_a, node_b):
+        if root is None:
+            return None
+
+        if root == node_a or root == node_b:
+            return root
+        matches = []
+        for child in root.successors:
+            res = self.find_lowest_common_ancestor(child, node_a, node_b)
+            if res is not None:
+                matches.append(res)
+
+        if len(matches) >= 2:
+            return root
+
+        return matches[0] if matches else None
 
     def incoherence(self, node: Cluster_Node):
         successors = torch.stack([n.centroid for n in node.successors]).to(self.tree.device)
@@ -397,28 +415,24 @@ class SHAPE:
         self.add(new_node, predecessor, [n.index for n in group])
         return new_node
 
-    def split(self, node: Cluster_Node):
+    def split(self, node: Cluster_Node, k_max=3):
         assert not node.is_leaf()
-        split_threshold = self.split_threshold
         data_points = torch.stack([s.centroid.detach() for s in node.successors])
         data_numpy = data_points.cpu().numpy()
         original_successors = list(node.successors)
-        max_k = len(original_successors)
-        for k in range(2, max_k + 1):
+        for k in range(2, k_max + 1):
             kmeans = KMeans(n_clusters=k, n_init=10, random_state=None)
             labels = kmeans.fit_predict(data_numpy)
             new_groups = [[] for _ in range(k)]
 
             for i, successor_node in enumerate(original_successors):
                 new_groups[labels[i]].append(successor_node)
-
-            new_nodes = [Cluster_Node(None, group, node.level, None, None) for group in new_groups]
+            new_nodes = [Cluster_Node(None, group, node.level, None, None) for group in new_groups if len(group) > 0]
             for n in new_nodes:
                 n.centroid, n.samples = self.tree.find_centroid(n.successors)
-
-            for n in new_nodes:
-                if self.incoherence(n) > split_threshold:
-                    continue
+            satisfied = all(self.incoherence(n) < self.split_threshold for n in new_nodes) or k == k_max
+            if not satisfied:
+                continue
 
             predecessor = self.tree.find_predecessor(node)
             for n in new_nodes:
@@ -427,15 +441,22 @@ class SHAPE:
             self.drop(node)
             return new_nodes
 
+    def _recur_update_attrs(self, lca, node_a, node_b):
+        def update_upwards(n, stop):
+            while n is not None and n != stop:
+                n.centroid, n.samples = self.tree.find_centroid(n.successors)
+                n = self.tree.find_predecessor(n)
+
+        update_upwards(node_a, lca)
+        update_upwards(node_b, lca)
+
     def graft(self, child: Cluster_Node, parent: Cluster_Node):
         assert not parent.is_leaf()
-        parent.successors.append(child)
-        parent.centroid = self.tree.find_centroid(parent.successors, return_n_samples=False)
-        parent.samples += child.samples
         predecessor = self.tree.find_predecessor(child)
+        ancestor = self.find_lowest_common_ancestor(self.tree.root(), parent, predecessor)
         predecessor.successors.remove(child)
-        predecessor.centroid = self.tree.find_centroid(predecessor.successors, return_n_samples=False)
-        predecessor.samples -= child.samples
+        parent.successors.append(child)
+        self._recur_update_attrs(ancestor, predecessor, parent)
 
     def trim(self, node: Cluster_Node):
         assert len(node.successors) == 1
@@ -444,6 +465,14 @@ class SHAPE:
         predecessor.successors.append(successor)
         self.drop(node)
 
+    def _check_tree_validity(self):
+        for node in self.tree.nodes:
+            if node.is_leaf():
+                continue
+            else:
+                assert node.samples == sum([s.samples for s in
+                                            node.successors]), f"{node} {node.samples} {sum([s.samples for s in node.successors])}"
+
     def run(self):
         self.log = {}
         max_level = self.tree.root().level
@@ -451,12 +480,10 @@ class SHAPE:
             nodes = self.tree._find_nodes_of_level(l)
             nodes_centroids = torch.stack([n.centroid for n in nodes]).to(self.tree.device)
             parents = self.tree._find_nodes_of_level(l + 1)
-            # DEBUG: good luck!
-            try:
-                parents_centroids = torch.stack([n.centroid for n in parents]).to(self.tree.device)
-            except RuntimeError:
-                print(parents)
-                raise RuntimeError
+            # TODO: level completed deleted.
+            if len(parents) == 0:
+                continue
+            parents_centroids = torch.stack([n.centroid for n in parents]).to(self.tree.device)
             D = self.tree.distance_measure(nodes_centroids, parents_centroids)
             for i, node in enumerate(nodes):
                 d_pre = self.tree.distance_measure(node.centroid.view(1, -1),
@@ -469,7 +496,7 @@ class SHAPE:
                 self.tree.logger.info(f"Graft: {node.index}: {ex_parent.index} -> {parent.index}")
                 self.graft(node, parent)
 
-        for l in range(1, max_level):
+        for l in range(1, max_level - 1):
             nodes = self.tree._find_nodes_of_level(l)
             if len(nodes) == 1:
                 continue
@@ -482,14 +509,13 @@ class SHAPE:
             pairs = [[a, b] for a, b in pairs if self.tree.find_predecessor(a) == self.tree.find_predecessor(b)]
             groups = union_find_groups(pairs)
             for group in groups:
-                node = self.merge(group)
                 self.tree.logger.info(f"Merge: {" + ".join([str(n.index) for n in group])} -> {node.index}")
 
         for l in range(1, max_level):
             nodes = self.tree._find_nodes_of_level(l)
             for node in nodes:
-                if self.incoherence(node) > self.split_threshold:
-                    new_nodes = self.split(node)
+                if self.incoherence(node) > self.split_threshold and len(node.successors) >=2: # FIXME: why node with one successor has incoherence != 0???
+                    new_nodes = self.split(node, self.max_splits)
                     try:
                         self.tree.logger.info(f"Split: {node.index} -> {[n.index for n in new_nodes]}")
                     except TypeError:
@@ -497,9 +523,8 @@ class SHAPE:
                         raise TypeError
 
         for node in self.tree.nodes.copy():
-            if node.is_leaf():
+            if node.is_leaf() or node == self.tree.root():
                 continue
-
             if len(node.successors) == 1:
                 self.tree.logger.info(f"Trim: {node.index}")
                 self.trim(node)

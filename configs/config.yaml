@@ -23,7 +23,11 @@ server:
   cluster_type: 'dmac'
   distance_metric: 'euclidean'
   threshold: 0.1 # suggested range for MNIST: [0.01, 0.2]
-  increment_factor: 1.1
+  increment_factor: 1.3
+  graft_tolerance: 0.1
+  split_threshold: 0.7
+  merge_threshold: 0.5
+  max_splits: 3
   scheme:
     rounds_before_first_clustering: null
 

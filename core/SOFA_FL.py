@@ -227,7 +227,11 @@ class SOFA_FL_Server:
                                                     device=self.device,
                                                     exp_dir=self.cfg['experiment']['experiment_dir'],
                                                     logger=self.logger)
-        self.shape = SHAPE(tree=self.architecture)
+        self.shape = SHAPE(tree=self.architecture,
+                           graft_tolerance=self.cfg['server']['graft_tolerance'],
+                           split_threshold=self.cfg['server']['split_threshold'],
+                           merge_threshold=self.cfg['server']['merge_threshold'],
+                           max_splits=self.cfg['server']['max_splits'],)
 
         self.data_share = cfg['client']['data_share']['activate']
         if self.data_share:
@@ -284,13 +288,15 @@ class SOFA_FL_Server:
         model.load_state_dict(state_dict)
         return model
 
-    def merge_weights(self, client_a, client_b):
-        model = copy.deepcopy(client_a.model)
+    def merge_weights(self, clients):
+        model = copy.deepcopy(clients[0].model)
         state_dict = model.state_dict()
-        w_a, w_b = client_a.w / (client_a.w + client_b.w), client_b.w / (client_a.w + client_b.w)
+        ws = [c.w for c in clients]
+        w_sum = sum(ws)
+        ws = [w / w_sum for w in ws]
 
         for key in state_dict.keys():
-            state_dict[key] = w_a * client_a.model.state_dict()[key] + w_b * client_b.model.state_dict()[key]
+            state_dict[key] = sum([ws[i] * clients[i].model.state_dict()[key] for i in range(len(clients))])
         model.load_state_dict(state_dict)
         return model
 
@@ -339,10 +345,9 @@ class SOFA_FL_Server:
         else:
             for node in self.shape.log.keys():
                 weights = None
-                if len(self.shape.log[node]) == 2:
-                    node_a, node_b = self.shape.log[node]
-                    client_a, client_b = self.node_to_client(node_a), self.node_to_client(node_b)
-                    weights = self.merge_weights(client_a, client_b)
+                if len(self.shape.log[node]) >= 2:
+                    clients = [self.node_to_client(n) for n in self.shape.log[node]]
+                    weights = self.merge_weights(clients)
                 elif len(self.shape.log[node]) == 1:
                     client = self.node_to_client(self.shape.log[node][0])
                     weights = self.copy_weights(client)
@@ -400,9 +405,9 @@ class Data_Share_Manager():
         self.mode = mode
 
     def __repr__(self):
-        return f"<Data_Share_Manager gamma={self.gamma}, mode={self.mode}>\nShare Records:\n{self.share_records_to_str(self.share_records)}"
+        return f"<Data_Share_Manager gamma={self.gamma}, mode={self.mode}>\nShare Records:\n{self.share_records_to_str()}"
 
-    def share_records_to_str(self, data, col_width=15):
+    def share_records_to_str(self, col_width=15):
         ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
         def strip_ansi(s: str) -> str:
@@ -421,7 +426,7 @@ class Data_Share_Manager():
 
         cols = []
 
-        for k, sub in data.items():
+        for k, sub in self.share_records.items():
             if len(sub) > 0:
                 active = k in self.server.clients_dict
                 lines = [color(f"{k}:", active)]
@@ -448,12 +453,12 @@ class Data_Share_Manager():
     def _validate_receiver_and_giver(self, receiver: SOFA_FL_Client, giver: SOFA_FL_Client):
         receiver_node = self.server.client_to_node(receiver)
         giver_node = self.server.client_to_node(giver)
-        if receiver.id in self.share_records and giver.id in self.share_records[receiver.id]:
-            return False
         if receiver_node.is_leaf():
             return False
             # return self.server.architecture.find_predecessor(receiver_node) == self.server.architecture.find_predecessor(giver_node)
         else:
+            if receiver.id in self.share_records and giver.id in self.share_records[receiver.id]:
+                return False
             return giver_node is None or giver_node in receiver_node.get_leaves()
 
     def initialize(self):
@@ -490,8 +495,8 @@ class Data_Share_Manager():
                         result.append([index, index + n_samples])
                         new_record_a[giver_id] = n_samples
                     index += n_samples
-                return result, 1, new_record_a, self.share_records[receiver_b.id]
-            return 1, 1, self.share_records[receiver_a.id], self.share_records[receiver_b.id]
+                return result, 1, new_record_a, self.share_records[receiver_b.id].copy()
+            return 1, 1, self.share_records[receiver_a.id].copy(), self.share_records[receiver_b.id].copy()
 
         new_share_dict = {c: {} for c in self.server.clients}
         shape_log = self.server.shape.log
@@ -506,7 +511,7 @@ class Data_Share_Manager():
             elif len(shape_log[node]) == 1:
                 client_prev = self._id_to_key(shape_log[node][0])
                 new_share_dict[client] = {client_prev: 1}
-                self.share_records[client.id] = self.share_records[client_prev.id]
+                self.share_records[client.id] = self.share_records[client_prev.id].copy()
         for receiver in new_share_dict:
             receiver_node = self.server.client_to_node(receiver)
             try:
@@ -526,6 +531,7 @@ class Data_Share_Manager():
                     distance = self.server.architecture.distance_measure(receiver_weight, client_weight)
                     s = self._calculate_s(distance)
                     new_share_dict[receiver][client] = np.clip(s, 0, client.privacy).item()
+                    assert new_share_dict[receiver][client] != 0, f"{s}, {client.privacy}"
                     self.share_records[receiver.id][client.id] = None
 
         self.share_dict = new_share_dict
@@ -549,20 +555,19 @@ class Data_Share_Manager():
             if not receiver.keep_data:
                 receiver.train_loader = receiver.backup_train_loader
             subsets = []
-            giver_ids = []
             for giver, indices in data_dict[receiver].items():
-                subsets.append(
-                    Subset(giver.get_shareable_data().dataset, indices) if indices is not None else giver.get_shareable_data().dataset)
-                giver_ids.append(giver.id)
+                subset = Subset(giver.get_shareable_data().dataset, indices) if indices is not None else giver.get_shareable_data().dataset
+                subsets.append(subset)
+                if giver.id in self.share_records[receiver.id]:
+                    self.share_records[receiver.id][giver.id] = len(subset)
             if len(subsets) == 0:
                 continue
-            for i, giver_id in enumerate(giver_ids):
-                if giver_id in self.share_records[receiver.id]:
-                    self.share_records[receiver.id][giver_id] = len(subsets[i])
-            subsets = [receiver.train_loader.dataset] if receiver.samples() != 0 else [] + subsets
+
+            assert None not in self.share_records[receiver.id].values(), f"\n{receiver}\n{self.share_records[receiver.id]}\n{self.share_dict[receiver]}\n{data_dict[receiver]}" # DEBUG
+            subsets = ([receiver.train_loader.dataset] if receiver.samples() != 0 else []) + subsets
             # datasets_samples = [len(dataset) for dataset in subsets]
             dataset = ConcatDataset(subsets)
-            assert len(dataset) == sum(item for item in self.share_records[receiver.id].values()) # DEBUG
+            assert len(dataset) == sum(item for item in self.share_records[receiver.id].values()), f"{receiver}\n{len(dataset)}\n{sum(item for item in self.share_records[receiver.id].values())}\n{self.share_records_to_str()}" # DEBUG
             data_loader = DataLoader(
                 dataset,
                 batch_size=self.server.batch_size,

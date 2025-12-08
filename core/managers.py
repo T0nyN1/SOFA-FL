@@ -124,8 +124,17 @@ class Base_Manager():
             clients_losses, local_losses = self.train_one_round()
         return clients_losses, local_losses
 
+    # DEBUG
+    def _check_tree_validity(self):
+        for node in self.server.architecture.nodes:
+            if node.is_leaf():
+                continue
+            else:
+                assert node.samples == sum([s.samples for s in node.successors]), f"{node} {node.samples} {sum([s.samples for s in node.successors])}"
+
     def _init_clustering(self):
         self.server.architecture.fit()
+        self._check_tree_validity()  # DEBUG
         self.server.update_clients()
         if self.server.data_share:
             self.server.data_share_manager.backup_train_loader()
@@ -134,9 +143,10 @@ class Base_Manager():
 
     def _update_clustering(self):
         self.server.shape.run()
+        self._check_tree_validity() # DEBUG
         self.server.update_clients()
         # DEBUG
-        assert set(self.server.clients_dict.keys()) == set(self.server.architecture.nodes_dict.keys()), f"{set(self.server.clients_dict.keys())}\n{set(self.server.architecture.nodes_dict.keys())}"
+        assert set(self.server.clients_dict.keys()) == set(self.server.architecture.nodes_dict.keys()), f"{set(self.server.clients_dict.keys())}\n{set(self.server.architecture.nodes_dict.keys())}\n{self.server}\n{self.server.architecture}"
         if self.server.data_share:
             self.server.data_share_manager.update()
             self.server.data_share_manager.share()
@@ -254,6 +264,10 @@ class Train_Manager(Base_Manager):
             self._update_stats("val_accuracies", accuracies)
 
     def run(self):
+        def _console_output():
+            self.logger.info(f"Round {self.round}:\n{self.server}")
+            if self.server.data_share:
+                self.logger.info(self.server.data_share_manager)
         self.logger.info("Start training..." if not self.parallel else "Start training in parallel...")
         self.logger.info("Warming up...")
         self._warm_up()
@@ -267,14 +281,10 @@ class Train_Manager(Base_Manager):
                                                           w=self.w,
                                                           h=self.h)
             self.dendrograms.append(img)
-        # DEBUG
-        print(self.server)
-        print(self.server.data_share_manager)
+        _console_output()
         for i in range(self.server.comm_rounds - 1):
             self.step()
-            # DEBUG
-            print(self.server)
-            print(self.server.data_share_manager)
+            _console_output()
         if self.vis:
             self.visualize()
         return self.stats
