@@ -390,12 +390,12 @@ class SHAPE:
             self.tree.find_predecessor(node) == (predecessor := self.tree.find_predecessor(group[0])) for node in group)
         if not all(node.level == group[0].level for node in group):
             return
-        node = Cluster_Node(-1, [s for node in group for s in node.successors], group[0].level, None, None)
-        node.centroid, node.samples = self.tree.find_centroid(node.successors)
+        new_node = Cluster_Node(-1, [s for node in group for s in node.successors], group[0].level, None, None)
+        new_node.centroid, new_node.samples = self.tree.find_centroid(new_node.successors)
         for node in group:
             self.drop(node)
-        self.add(node, predecessor, [node.index for node in group])
-        return node
+        self.add(new_node, predecessor, [n.index for n in group])
+        return new_node
 
     def split(self, node: Cluster_Node):
         assert not node.is_leaf()
