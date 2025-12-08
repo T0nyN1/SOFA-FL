@@ -1,15 +1,18 @@
 import copy
+import io
 import itertools
 import os.path
 from typing import List, Union
 
+import numpy as np
 import plotly.graph_objects as go
 import torch
+from PIL import Image
 from scipy.cluster.hierarchy import linkage
 from sklearn.cluster import KMeans
 from tqdm import tqdm
 
-from utils.utility import euclidean_distance, manhattan_distance
+from utils.utility import euclidean_distance, manhattan_distance, union_find_groups
 
 
 class Cluster_Node:
@@ -25,10 +28,10 @@ class Cluster_Node:
 
     def get_leaves(self):
         if self.is_leaf():
-            return self
+            return [self]
         leaves = []
         for successor in self.successors:
-            leaves.append(successor.get_leaves())
+            leaves.extend(successor.get_leaves())
         return leaves
 
     def __repr__(self):
@@ -52,7 +55,7 @@ class Hierarchical_Clustering:
         self.increment_factor = increment_factor
         self.max_index = len(self.nodes) - 1
         self.exp_dir = exp_dir
-        self.node_dict = {}
+        self.nodes_dict = {}
         self.update_nodes_dict()
         self.logger = logger
 
@@ -74,7 +77,7 @@ class Hierarchical_Clustering:
         return s
 
     def update_nodes_dict(self):
-        self.node_dict = self.clients_dict = {n.index:i for i, n in enumerate(self.nodes)}
+        self.nodes_dict = self.clients_dict = {n.index: i for i, n in enumerate(self.nodes)}
 
     def root(self) -> Cluster_Node:
         return self._find_nodes_of_level(max([n.level for n in self.nodes]))[0]
@@ -111,42 +114,9 @@ class Hierarchical_Clustering:
         for i, (client, centroid) in enumerate(zip(clients, centroids)):
             client.centroid = centroid
 
-    # def update(self, weights_list):
-    #     # TODO: keep index and network arch. HOW TO???
-    #     self.weights_list = weights_list
-    #     self.clustering()
-
     def _increment_index(self) -> int:
         self.max_index += 1
         return self.max_index
-
-    def _find_merge_groups(self, pairs) -> List[Cluster_Node]:
-        groups = []
-        visited = set()
-
-        def find_group(groups, elem):
-            for i, group in enumerate(groups):
-                if elem in group:
-                    return i
-
-        for (a, b) in pairs:
-            if a not in visited:
-                visited.add(a)
-                if b not in visited:
-                    visited.add(b)
-                    groups.append([a, b])
-                else:
-                    groups[find_group(groups, b)].append(a)
-            else:
-                if b not in visited:
-                    visited.add(b)
-                    groups[find_group(groups, a)].append(b)
-                else:
-                    if (group_a := find_group(groups, a)) != (group_b := find_group(groups, b)):
-                        groups[group_a] += (temp := groups[group_b])
-                        groups.remove(temp)
-
-        return groups
 
     def find_centroid(self, nodes, return_n_samples=True) -> Union[torch.Tensor, int]:
         centroids_all = torch.stack([n.centroid for n in nodes], dim=0)
@@ -204,7 +174,7 @@ class Hierarchical_Clustering:
                 else:
                     threshold = self.threshold
 
-                merge_groups = self._find_merge_groups(pairs)
+                merge_groups = union_find_groups(pairs)
                 remaining = list(set(remaining) - set(itertools.chain.from_iterable(merge_groups)))
                 nodes = [self.nodes[i] for i in remaining]
 
@@ -267,7 +237,7 @@ class Hierarchical_Clustering:
             self.nodes.append(cluster)
             new_nodes.append(cluster)
 
-    def visualize_tree(self, save_plot=True, name="Dendrogram"):
+    def visualize_tree(self, name="Dendrogram", **kwargs):
         positions = {}
         leaf_x_counter = 0
 
@@ -352,18 +322,35 @@ class Hierarchical_Clustering:
                 title="Hierarchy Level (inverted)",
                 showgrid=False,
                 zeroline=False,
-                range=[-0.5, max_level+0.5]
+                range=[-0.5, max_level + 0.75]
             ),
             plot_bgcolor="white",
             hovermode="closest",
             height=600,
             margin=dict(t=100, b=50, l=50, r=50)
         )
-        if save_plot:
-            # fig.write_image(os.path.join(self.exp_dir, f"{name}.svg"))
-            fig.write_html(os.path.join(self.exp_dir, f"{name}.html"))
-        else:
+
+        if kwargs.get("save_plot", False):
+            extension = kwargs.get("format", "html")
+            if extension == "html":
+                fig.write_html(os.path.join(self.exp_dir, f"{name}.html"))
+            else:
+                try:
+                    fig.write_image(os.path.join(self.exp_dir, f"{name}.{extension}"))
+                except:
+                    self.logger.warning(f"Could not write image in format: {extension}, changed to html")
+                    fig.write_html(os.path.join(self.exp_dir, f"{name}.html"))
+
+        if kwargs.get("show", False):
             fig.show()
+
+        if kwargs.get("return_img", False):
+            img_bytes = fig.to_image(format="png", width=kwargs.get("width", 1000), height=kwargs.get("height", 600),
+                                     scale=kwargs.get("scale", 1))
+
+            img = Image.open(io.BytesIO(img_bytes))
+            img_array = np.array(img)
+            return img_array
 
 
 class SHAPE:
@@ -397,16 +384,18 @@ class SHAPE:
                     self.log[key] = self.log[node]
         self.log[node] = []
 
-    def merge(self, node_a: Cluster_Node, node_b: Cluster_Node):
-        assert not node_a.is_leaf() and not node_b.is_leaf()
-        assert (predecessor := self.tree.find_predecessor(node_a)) == self.tree.find_predecessor(node_b)
-        if not node_a.level == node_b.level:
+    def merge(self, group: List[Cluster_Node]):
+        assert all(not node.is_leaf() for node in group)
+        assert all(
+            self.tree.find_predecessor(node) == (predecessor := self.tree.find_predecessor(group[0])) for node in group)
+        if not all(node.level == group[0].level for node in group):
             return
-        node = Cluster_Node(node_a.index, node_a.successors + node_b.successors, node_a.level, None, None)
+        node = Cluster_Node(-1, [s for node in group for s in node.successors], group[0].level, None, None)
         node.centroid, node.samples = self.tree.find_centroid(node.successors)
-        self.drop(node_a)
-        self.drop(node_b)
-        self.add(node, predecessor, [node_a.index, node_b.index])
+        for node in group:
+            self.drop(node)
+        self.add(node, predecessor, [node.index for node in group])
+        return node
 
     def split(self, node: Cluster_Node):
         assert not node.is_leaf()
@@ -436,8 +425,7 @@ class SHAPE:
                 self.add(n, predecessor, [node.index])
 
             self.drop(node)
-            return # Do not delete!
-
+            return new_nodes
 
     def graft(self, child: Cluster_Node, parent: Cluster_Node):
         assert not parent.is_leaf()
@@ -449,14 +437,12 @@ class SHAPE:
         predecessor.centroid = self.tree.find_centroid(predecessor.successors, return_n_samples=False)
         predecessor.samples -= child.samples
 
-
     def trim(self, node: Cluster_Node):
         assert len(node.successors) == 1
         successor = node.successors[0]
         predecessor = self.tree.find_predecessor(node)
         predecessor.successors.append(successor)
         self.drop(node)
-
 
     def run(self):
         self.log = {}
@@ -474,12 +460,13 @@ class SHAPE:
             D = self.tree.distance_measure(nodes_centroids, parents_centroids)
             for i, node in enumerate(nodes):
                 d_pre = self.tree.distance_measure(node.centroid.view(1, -1),
-                                                   self.tree.find_predecessor(node).centroid.view(1, -1)).item()
+                                                   (ex_parent := self.tree.find_predecessor(node)).centroid.view(1,
+                                                                                                                 -1)).item()
                 d_min = torch.min(D[i]).item()
                 if d_min * (1 + self.graft_tolerance) > d_pre:
                     continue
                 parent = parents[torch.argmin(D[i])]
-                self.tree.logger.info(f"Graft: {node.index} -> {node.index}")
+                self.tree.logger.info(f"Graft: {node.index}: {ex_parent.index} -> {parent.index}")
                 self.graft(node, parent)
 
         for l in range(1, max_level):
@@ -492,18 +479,22 @@ class SHAPE:
             D = self.tree._matrix_min_max_normalization(D, mask)
             mask = torch.triu(D < self.merge_threshold, diagonal=1)
             pairs = [[nodes[i.item()], nodes[j.item()]] for i, j in torch.nonzero(mask, as_tuple=False)]
-            for node_a, node_b in pairs:
-                if not self.tree.find_predecessor(node_a) == self.tree.find_predecessor(node_b):
-                    continue
-                self.tree.logger.info(f"Merge: {node_a.index} + {node_b.index}")
-                self.merge(node_a, node_b)
+            pairs = [[a, b] for a, b in pairs if self.tree.find_predecessor(a) == self.tree.find_predecessor(b)]
+            groups = union_find_groups(pairs)
+            for group in groups:
+                node = self.merge(group)
+                self.tree.logger.info(f"Merge: {" + ".join([str(n.index) for n in group])} -> {node.index}")
 
         for l in range(1, max_level):
             nodes = self.tree._find_nodes_of_level(l)
             for node in nodes:
                 if self.incoherence(node) > self.split_threshold:
-                    self.tree.logger.info(f"Split: {node.index}")
-                    self.split(node)
+                    new_nodes = self.split(node)
+                    try:
+                        self.tree.logger.info(f"Split: {node.index} -> {[n.index for n in new_nodes]}")
+                    except TypeError:
+                        print(new_nodes)
+                        raise TypeError
 
         for node in self.tree.nodes.copy():
             if node.is_leaf():

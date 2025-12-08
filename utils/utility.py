@@ -1,9 +1,9 @@
+import logging
 import os
 from datetime import datetime
-import numpy as np
-import pandas as pd
+
 import torch
-import logging
+
 
 def get_logger(name, log_dir):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -33,6 +33,7 @@ def get_logger(name, log_dir):
     logger.addHandler(file_handler)
     return logger
 
+
 def increment_dir(save_dir, name='run'):
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
@@ -42,10 +43,12 @@ def increment_dir(save_dir, name='run'):
     os.makedirs(des, exist_ok=False)
     return des
 
+
 def euclidean_distance(x: torch.Tensor, y: torch.Tensor = None) -> torch.Tensor:
     if y is None:
         return torch.cdist(x, x, p=2)
     return torch.cdist(x, y, p=2)
+
 
 def manhattan_distance(x: torch.Tensor, y: torch.Tensor = None) -> torch.Tensor:
     if y is None:
@@ -53,3 +56,28 @@ def manhattan_distance(x: torch.Tensor, y: torch.Tensor = None) -> torch.Tensor:
     return torch.cdist(x, y, p=1)
 
 
+def union_find_groups(pairs):
+    parent = {}
+
+    def find(x):
+        if x not in parent:
+            parent[x] = x
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for a, b in pairs:
+        union(a, b)
+
+    groups = {}
+    for x in parent:
+        root = find(x)
+        groups.setdefault(root, []).append(x)
+
+    return list(groups.values())

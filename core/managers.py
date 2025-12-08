@@ -1,12 +1,14 @@
 import os.path
 
+import imageio.v2 as imageio
 import plotly.graph_objects as go
 import torch
-import torch.nn.functional as F
 import torch.multiprocessing as mp
+import torch.nn.functional as F
 from tqdm import tqdm
 
 from core.loss import SOFA_FL_Loss
+
 
 # TODO: train progress log, currently unimplemented.
 
@@ -22,7 +24,7 @@ class Base_Manager():
         local_objective_dict = {'cross_entropy': F.cross_entropy,
                                 'mse': F.mse_loss,
                                 'mae': F.l1_loss,
-                                'ce': F.cross_entropy,}
+                                'ce': F.cross_entropy, }
         if key not in local_objective_dict.keys():
             raise ValueError('Unknown local objective {}'.format(key))
         return local_objective_dict[key]
@@ -47,8 +49,9 @@ class Base_Manager():
     def train_one_round(self):
         losses = {}
         local_losses = {}
-        for client in tqdm(self.server.clients[:self.server.n_clients],
-                           desc=f"Round {self.round} | Clients local updating: "):
+        for client in tqdm(self.server.clients, desc=f"Round {self.round} | Clients local updating: "):
+            if client.samples() == 0:
+                continue
 
             id, loss, local_loss = client.local_update(*self._instantiate_criterion(client))
             self.server.sync_client_weights(client)
@@ -75,8 +78,7 @@ class Base_Manager():
 
     def train_one_round_parallel(self):
         MAX_WORKERS = self.server.cfg['experiment']['num_workers']
-
-        selected_clients = self.server.clients[:self.server.n_clients]
+        selected_clients = [client for client in self.server.clients if client.samples() > 0]
         tasks = []
 
         for client in selected_clients:
@@ -125,10 +127,19 @@ class Base_Manager():
     def _init_clustering(self):
         self.server.architecture.fit()
         self.server.update_clients()
+        if self.server.data_share:
+            self.server.data_share_manager.backup_train_loader()
+            self.server.data_share_manager.initialize()
+            self.server.data_share_manager.share()
 
     def _update_clustering(self):
         self.server.shape.run()
         self.server.update_clients()
+        # DEBUG
+        assert set(self.server.clients_dict.keys()) == set(self.server.architecture.nodes_dict.keys()), f"{set(self.server.clients_dict.keys())}\n{set(self.server.architecture.nodes_dict.keys())}"
+        if self.server.data_share:
+            self.server.data_share_manager.update()
+            self.server.data_share_manager.share()
 
     def evaluate(self):
         accuracies = {}
@@ -200,11 +211,17 @@ class Base_Manager():
 
 
 class Train_Manager(Base_Manager):
-    def __init__(self, server, logger, visualize=True, val=False):
+    def __init__(self, server, logger, val=False, visualize=True):
         super().__init__(server, logger)
-        self.vis = visualize
+        self.vis = visualize != "off"
+        if self.vis:
+            self.save_plot = self.server.cfg['output']['mode'] == "save"
+            self.vis_arch = self.server.cfg['output']['visualize_architecture']
+            self.w, self.h = self.server.cfg['output']['image_size']
+            self.duration = self.server.cfg['output']['duration']
+            self.dendrograms = []
         self.val = val
-        self.stats = {"train_losses": [], "val_accuracies": [], "local_losses":[]}
+        self.stats = {"train_losses": [], "val_accuracies": [], "local_losses": []}
 
     def _update_stats(self, key, values):
         self.stats[key].append(values)
@@ -227,9 +244,11 @@ class Train_Manager(Base_Manager):
         self._update_stats("train_losses", clients_losses)
         self._update_stats("local_losses", local_losses)
         self._update_clustering()
-        # Uncomment if visualizing complete clustering process.
-        if self.vis:
-            self.server.architecture.visualize_tree(name=f"Dendrogram_round_{self.round}")
+        if self.vis and self.vis_arch and self.save_plot:
+            img = self.server.architecture.visualize_tree(return_img=True,
+                                                          w = self.w,
+                                                          h = self.h)
+            self.dendrograms.append(img)
         if self.val:
             accuracies = self.evaluate()
             self._update_stats("val_accuracies", accuracies)
@@ -243,13 +262,21 @@ class Train_Manager(Base_Manager):
             self._update_stats("val_accuracies", accuracies)
         self.logger.info("Forming server architecture...")
         self._init_clustering()
-        # Uncomment if visualizing complete clustering process.
-        if self.vis:
-            self.server.architecture.visualize_tree(name=f"Dendrogram_round_{self.round}")
+        if self.vis and self.vis_arch and self.save_plot:
+            img = self.server.architecture.visualize_tree(return_img=True,
+                                                          w=self.w,
+                                                          h=self.h)
+            self.dendrograms.append(img)
+        # DEBUG
+        print(self.server)
+        print(self.server.data_share_manager)
         for i in range(self.server.comm_rounds - 1):
             self.step()
+            # DEBUG
+            print(self.server)
+            print(self.server.data_share_manager)
         if self.vis:
-            self.visualize(arch=True, save_plot=True)
+            self.visualize()
         return self.stats
 
     def visualize_train_losses(self, train_losses_data, save_plot=True, name="train_losses"):
@@ -311,7 +338,7 @@ class Train_Manager(Base_Manager):
                 'font': dict(size=18, color='black')
             },
             xaxis_title={
-                'text': "Communication Rounds (Spread represents Local Epochs)",
+                'text': "Communication Rounds",
                 'font': dict(size=14, color='black')
             },
             yaxis_title={
@@ -332,7 +359,7 @@ class Train_Manager(Base_Manager):
         )
 
         axis_tickvals = [r + 0.5 for r in range(num_rounds)]
-        axis_ticktext = [f'Round {r}' for r in range(num_rounds)]
+        axis_ticktext = [f'{r}' for r in range(num_rounds)]
 
         if num_rounds > 30:
             step = num_rounds // 15
@@ -459,13 +486,19 @@ class Train_Manager(Base_Manager):
         else:
             fig.show()
 
-    def visualize(self, arch=False, save_plot=True):
-        if arch:
-            self.server.architecture.visualize_tree(save_plot=save_plot)
-        self.visualize_train_losses(self.stats["train_losses"], save_plot=save_plot)
-        self.visualize_train_losses(self.stats["local_losses"], save_plot=save_plot, name="local_losses")
+    def visualize_clustering_evolution(self, dendrograms, name="clustering_evolution", duration=0.5):
+        imageio.mimsave(os.path.join(self.server.cfg['experiment']['experiment_dir'], f"{name}.gif"), dendrograms,
+                        duration=duration)
+
+    def visualize(self):
+        if self.vis_arch:
+            self.server.architecture.visualize_tree(save_plot=self.save_plot)
+            if self.save_plot:
+                self.visualize_clustering_evolution(self.dendrograms, duration=self.server.cfg["output"]["duration"])
+        self.visualize_train_losses(self.stats["train_losses"], save_plot=self.save_plot)
+        self.visualize_train_losses(self.stats["local_losses"], save_plot=self.save_plot, name="local_losses")
         if self.val:
-            self.visualize_val_accuracy(save_plot=save_plot)
+            self.visualize_val_accuracy(save_plot=self.save_plot)
 
 
 class Evaluation_Manager(Base_Manager):

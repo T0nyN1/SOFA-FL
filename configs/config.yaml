@@ -6,6 +6,7 @@ experiment:
   seed: 42
   device: 'auto'
   parallel_training: true
+  evaluation: on
   num_workers: 4
 
 train:
@@ -21,7 +22,7 @@ server:
   comm_rounds: 20
   cluster_type: 'dmac'
   distance_metric: 'euclidean'
-  threshold: 0.03
+  threshold: 0.1 # suggested range for MNIST: [0.01, 0.2]
   increment_factor: 1.1
   scheme:
     rounds_before_first_clustering: null
@@ -32,8 +33,20 @@ client:
   batch_size: 100
   local_updates: 5
   max_iters: null
+  data_share:
+    activate: on
+    mode: "adapt"
+    gamma: 5000
+    maximum_sharing_ratio: 0.2
+    keep_data: True
 
 data:
   iid: false
   alpha: 1
   in_channels: 784
+
+output:
+  mode: "save" # "save" or "show" or "off"
+  visualize_architecture: on
+  image_size: [1000, 600]
+  duration: 2
