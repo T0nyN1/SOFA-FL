@@ -35,7 +35,7 @@ client:
   lr: 0.001
   weight_decay: 0.0001
   batch_size: 100
-  local_updates: 5
+  local_updates: 1
   max_iters: null
   data_share:
     activate: on
