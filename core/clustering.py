@@ -72,6 +72,8 @@ class Hierarchical_Clustering:
         for level in range(max_level + 1):
             s += f"Level {level}\n"
             nodes = sorted(self._find_nodes_of_level(level), key=lambda n: n.index)
+            if len(nodes) == 0:
+                s += str(None)
             for node in nodes:
                 s += node.__repr__() + "\n"
         return s
@@ -329,17 +331,19 @@ class Hierarchical_Clustering:
             height=600,
             margin=dict(t=100, b=50, l=50, r=50)
         )
+        save_dir = kwargs.get("save_dir", None)
+        save_dir = self.exp_dir if save_dir is None else save_dir
 
         if kwargs.get("save_plot", False):
             extension = kwargs.get("format", "html")
             if extension == "html":
-                fig.write_html(os.path.join(self.exp_dir, f"{name}.html"))
+                fig.write_html(os.path.join(save_dir, f"{name}.html"))
             else:
                 try:
-                    fig.write_image(os.path.join(self.exp_dir, f"{name}.{extension}"))
+                    fig.write_image(os.path.join(save_dir, f"{name}.{extension}"), width=kwargs.get("width", 1000), height=kwargs.get("height", 600))
                 except:
                     self.logger.warning(f"Could not write image in format: {extension}, changed to html")
-                    fig.write_html(os.path.join(self.exp_dir, f"{name}.html"))
+                    fig.write_html(os.path.join(save_dir, f"{name}.html"))
 
         if kwargs.get("show", False):
             fig.show()
@@ -478,6 +482,8 @@ class SHAPE:
         max_level = self.tree.root().level
         for l in range(max_level - 1):
             nodes = self.tree._find_nodes_of_level(l)
+            if len(nodes) == 0:
+                continue
             nodes_centroids = torch.stack([n.centroid for n in nodes]).to(self.tree.device)
             parents = self.tree._find_nodes_of_level(l + 1)
             # TODO: level completed deleted.
@@ -498,7 +504,7 @@ class SHAPE:
 
         for l in range(1, max_level - 1):
             nodes = self.tree._find_nodes_of_level(l)
-            if len(nodes) == 1:
+            if len(nodes) == 0:
                 continue
             centroids = torch.stack([n.centroid for n in nodes]).to(self.tree.device)
             D = self.tree.distance_measure(centroids)
