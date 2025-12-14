@@ -6,6 +6,7 @@ import torch
 import torch.multiprocessing as mp
 import torch.nn.functional as F
 from tqdm import tqdm
+from itertools import zip_longest
 
 from core.loss import SOFA_FL_Loss
 
@@ -225,7 +226,8 @@ class Train_Manager(Base_Manager):
         super().__init__(server, logger)
         self.vis = visualize != "off"
         if self.vis:
-            self.save_plot = self.server.cfg['output']['mode'] == "save"
+            self.save_plot = self.server.cfg['output']['mode'] == "save" or "save" in self.server.cfg['output']['mode']
+            self.show = self.server.cfg['output']['mode'] == "show" or "show" in self.server.cfg['output']['mode']
             self.vis_arch = self.server.cfg['output']['visualize_architecture']
             self.w, self.h = self.server.cfg['output']['image_size']
             self.duration = self.server.cfg['output']['duration']
@@ -257,15 +259,20 @@ class Train_Manager(Base_Manager):
         if self.vis and self.vis_arch and self.save_plot:
             img = self.server.architecture.visualize_tree(return_img=True,
                                                           w = self.w,
-                                                          h = self.h)
+                                                          h = self.h,
+                                                          show=self.show)
             self.dendrograms.append(img)
         if self.val:
             accuracies = self.evaluate()
             self._update_stats("val_accuracies", accuracies)
 
     def run(self):
-        def _console_output():
-            self.logger.info(f"Round {self.round}:\n{self.server}")
+        def _console_output(gap=10):
+            server_str = self.server.__repr__().split('\n')
+            arch_str = self.server.architecture.__repr__().split('\n')
+            length = max([len(line) for line in server_str])
+            info = [f"{a:<{length+gap}}{b}" for a, b in zip_longest(server_str, arch_str, fillvalue="")]
+            self.logger.info(f"Round {self.round}:\n{"\n".join(info)}")
             if self.server.data_share:
                 self.logger.info(self.server.data_share_manager)
         self.logger.info("Start training..." if not self.parallel else "Start training in parallel...")
@@ -279,7 +286,8 @@ class Train_Manager(Base_Manager):
         if self.vis and self.vis_arch and self.save_plot:
             img = self.server.architecture.visualize_tree(return_img=True,
                                                           w=self.w,
-                                                          h=self.h)
+                                                          h=self.h,
+                                                          show=self.show)
             self.dendrograms.append(img)
         _console_output()
         for i in range(self.server.comm_rounds - 1):
