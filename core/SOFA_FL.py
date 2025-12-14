@@ -341,6 +341,7 @@ class SOFA_FL_Server:
                                    max_iters=None,
                                    privacy=None,
                                    device=self.device))
+            self._update_ws([self.clients[-1]])
             self.update_clients_dict()
         else:
             for node in self.shape.log.keys():
@@ -381,6 +382,7 @@ class SOFA_FL_Server:
                 successors_clients = [self.node_to_client(s) for s in successors]
                 self._update_ws(successors_clients)
                 self._update_test_data(self.node_to_client(node), successors_clients)
+            self._update_ws([self.node_to_client(self.architecture.root())])
 
     def sync_client_weights(self, client):
         node = self.client_to_node(client)
