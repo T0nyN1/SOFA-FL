@@ -35,7 +35,7 @@ class Cluster_Node:
         return leaves
 
     def __repr__(self):
-        return f"<Cluster_Node(index={self.index}, level={self.level}, centroid={self.centroid}, samples={self.samples}, successors={[n.index for n in self.successors] if self.successors else None})>"
+        return f"<Cluster_Node(index={self.index}, level={self.level}, centroid={str(self.centroid).replace("\n      ", "")}, samples={self.samples}, successors={[n.index for n in self.successors] if self.successors else None})>"
 
     def __hash__(self):
         return hash(self.index)
@@ -67,16 +67,19 @@ class Hierarchical_Clustering:
             raise NotImplementedError("Unknown distance measure")
 
     def __repr__(self):
-        s = ''
-        max_level = max([n.level for n in self.nodes])
-        for level in range(max_level + 1):
-            s += f"Level {level}\n"
-            nodes = sorted(self._find_nodes_of_level(level), key=lambda n: n.index)
-            if len(nodes) == 0:
-                s += str(None)
-            for node in nodes:
-                s += node.__repr__() + "\n"
+        s = f'<Hierarchical_Clustering(type={self.type}, distance={self.distance_measure.__name__}, threshold={self.threshold}, increment_factor={self.increment_factor})>'
+        s += "\nNodes\n" + "\n".join([node.__repr__() for node in sorted(self.nodes, key=lambda n: n.index)])
         return s
+        # s = ''
+        # max_level = max([n.level for n in self.nodes])
+        # for level in range(max_level + 1):
+        #     s += f"Level {level}\n"
+        #     nodes = sorted(self._find_nodes_of_level(level), key=lambda n: n.index)
+        #     if len(nodes) == 0:
+        #         s += str(None)
+        #     for node in nodes:
+        #         s += node.__repr__() + "\n"
+        # return s
 
     def update_nodes_dict(self):
         self.nodes_dict = self.clients_dict = {n.index: i for i, n in enumerate(self.nodes)}
@@ -151,6 +154,21 @@ class Hierarchical_Clustering:
         for n in self.nodes:
             if not n.is_leaf() and node in n.successors:
                 return n
+
+    def normalize_levels(self):
+        s = []
+        levels = sorted(list({n.level for n in self.nodes}))
+        current_level = -1
+        for level in levels:
+            current_level += 1
+            if level == current_level:
+                continue
+            else:
+                s.append(f"{level} -> {current_level}")
+                nodes = self._find_nodes_of_level(level)
+                for node in nodes:
+                    node.level = current_level
+        return "Normalize levels: " + ", ".join(s) if len(s) > 0 else ""
 
     def dynamic_multi_branch_agglomerative_clustering(self):
         nodes = copy.deepcopy(self.nodes)
@@ -340,7 +358,8 @@ class Hierarchical_Clustering:
                 fig.write_html(os.path.join(save_dir, f"{name}.html"))
             else:
                 try:
-                    fig.write_image(os.path.join(save_dir, f"{name}.{extension}"), width=kwargs.get("width", 1000), height=kwargs.get("height", 600))
+                    fig.write_image(os.path.join(save_dir, f"{name}.{extension}"), width=kwargs.get("width", 1000),
+                                    height=kwargs.get("height", 600))
                 except:
                     self.logger.warning(f"Could not write image in format: {extension}, changed to html")
                     fig.write_html(os.path.join(save_dir, f"{name}.html"))
@@ -360,7 +379,8 @@ class Hierarchical_Clustering:
 class SHAPE:
     '''implements the Self-organizing Hierarchical Adaptive Propagation and Evolution (SHAPE) algorithm'''
 
-    def __init__(self, tree: Hierarchical_Clustering, graft_tolerance=0.1, split_threshold=0.5, merge_threshold=0.5, max_splits=3):
+    def __init__(self, tree: Hierarchical_Clustering, graft_tolerance=0.1, split_threshold=0.5, merge_threshold=0.5,
+                 max_splits=3):
         self.tree: Hierarchical_Clustering = tree
         self.split_threshold = split_threshold
         self.graft_tolerance = graft_tolerance
@@ -392,13 +412,15 @@ class SHAPE:
         return torch.mean(D).item()
 
     def add(self, node, predecessor, log_value):
-        predecessor.successors.append(node)
+        if predecessor is not None:
+            predecessor.successors.append(node)
         self.tree.add_node(node)
         self.log[node] = log_value
 
     def drop(self, node):
         predecessor = self.tree.find_predecessor(node)
-        predecessor.successors.remove(node)
+        if predecessor is not None:
+            predecessor.successors.remove(node)
         self.tree.drop_node(node)
         if node in self.log.keys() and len(self.log[node]) == 2:
             for key, value in self.log.items():
@@ -469,6 +491,15 @@ class SHAPE:
         predecessor.successors.append(successor)
         self.drop(node)
 
+    def collapse(self):
+        root = self.tree.root()
+        assert len(root.successors) == 1
+        node = root.successors[0]
+        new_root = Cluster_Node(None, node.successors.copy(), root.level, root.centroid, root.samples)
+        self.add(new_root, None, [root.index, node.index])
+        self.drop(root)
+        self.drop(node)
+
     def _check_tree_validity(self):
         for node in self.tree.nodes:
             if node.is_leaf():
@@ -520,7 +551,8 @@ class SHAPE:
         for l in range(1, max_level):
             nodes = self.tree._find_nodes_of_level(l)
             for node in nodes:
-                if self.incoherence(node) > self.split_threshold and len(node.successors) >=2: # FIXME: why node with one successor has incoherence != 0???
+                if self.incoherence(node) > self.split_threshold and len(
+                        node.successors) >= 2:  # FIXME: why node with one successor has incoherence != 0???
                     new_nodes = self.split(node, self.max_splits)
                     try:
                         self.tree.logger.info(f"Split: {node.index} -> {[n.index for n in new_nodes]}")
@@ -534,5 +566,13 @@ class SHAPE:
             if len(node.successors) == 1:
                 self.tree.logger.info(f"Trim: {node.index}")
                 self.trim(node)
+
+        if len(self.tree.root().successors) == 1:
+            self.collapse()
+            self.tree.logger.info(f"Collapse: {self.tree.root().index}")
+
+        record = self.tree.normalize_levels()
+        if record is not None:
+            self.tree.logger.info(record)
 
         self.tree.update_nodes_dict()
