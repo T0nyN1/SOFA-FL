@@ -50,7 +50,7 @@ data:
   in_channels: 784
 
 output:
-  mode: "save" # "save" or "show" or "off"
+  mode: ["save"] # "save" or "show" or "off"
   visualize_architecture: on
   image_size: [1000, 600]
   duration: 2
