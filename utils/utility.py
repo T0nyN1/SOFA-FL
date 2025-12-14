@@ -1,8 +1,22 @@
 import logging
 import os
+import re
 from datetime import datetime
 
 import torch
+
+
+class PlainFormatter(logging.Formatter):
+    ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-9;]*[0-9A-Za-z])')
+
+    def remove_ansi_colors(self, text):
+        return self.ANSI_ESCAPE.sub('', text)
+
+    def format(self, record):
+        if isinstance(record.msg, str):
+            record.msg = self.remove_ansi_colors(record.msg)
+
+        return super().format(record)
 
 
 def get_logger(name, log_dir):
@@ -26,10 +40,14 @@ def get_logger(name, log_dir):
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, f"{name}_{timestamp}.log")
 
-    file_handler = logging.FileHandler(log_file, encoding='utf-8')
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(formatter)
+    plain_formatter = PlainFormatter(
+        "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        "%Y-%m-%d %H:%M:%S"
+    )
 
+    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(plain_formatter)
     logger.addHandler(file_handler)
     return logger
 
