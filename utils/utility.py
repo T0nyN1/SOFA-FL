@@ -5,12 +5,11 @@ from datetime import datetime
 
 import torch
 
+ANSI_ESCAPE = re.compile(r'\033(?:[@-Z\\-_]|\[[0-9;]*[0-9A-Za-z])')
 
 class PlainFormatter(logging.Formatter):
-    ANSI_ESCAPE = re.compile(r'\033(?:[@-Z\\-_]|\[[0-9;]*[0-9A-Za-z])')
-
     def remove_ansi_colors(self, text):
-        return self.ANSI_ESCAPE.sub('', text)
+        return ANSI_ESCAPE.sub('', text)
 
     def format(self, record):
         formatted_string = super().format(record)

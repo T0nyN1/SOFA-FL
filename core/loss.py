@@ -36,7 +36,7 @@ class SOFA_FL_Loss(nn.Module):
 
     def forward(self, outputs, targets, model, siblings, predecessor):
         local_loss = self.local_objective_func(outputs, targets)
-        inter_loss = self.alpha * inter_cluster_loss(model, siblings) if siblings is not None else 0
-        intra_loss = self.beta * intra_cluster_loss(model, predecessor) if predecessor is not None else 0
+        inter_loss = self.alpha * inter_cluster_loss(model, siblings) if siblings is not None else torch.tensor(0.0)
+        intra_loss = self.beta * intra_cluster_loss(model, predecessor) if predecessor is not None else torch.tensor(0.0)
 
         return local_loss, inter_loss, intra_loss
