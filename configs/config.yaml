@@ -50,7 +50,9 @@ data:
   in_channels: 784
 
 output:
-  mode: ["save"] # "save" or "show" or "off"
-  visualize_architecture: on
+  export_statistics: ["train_losses", "local_losses", "val_accuracies"]
+  show_plots: off # [...]
+  save_plots: ["architecture", "train_losses", "local_losses", "inter_cluster_losses", "intra_cluster_losses", "val_accuracies"]
+  format: "jpg"
   image_size: [1000, 600]
   duration: 2

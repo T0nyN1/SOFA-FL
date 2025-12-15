@@ -14,26 +14,26 @@ from utils.dataset import partition_dataset
 
 
 def train_client(model, train_loader, siblings, predecessor, optimizer, criterion, max_iters=None, device='cpu'):
-    losses = []
-    local_losses = []
+    losses = {"train_losses": [], "local_losses": [], "inter_cluster_losses": [], "intra_cluster_losses": []}
 
     model.train()
     for i, (inputs, targets) in enumerate(train_loader):
         if max_iters is not None and i == max_iters:
             break
         inputs, targets = inputs.to(device), targets.to(device)
-        with torch.set_grad_enabled(True):
-            outputs = model(inputs)
-            local_loss, inter_loss, intra_loss = criterion(outputs, targets, model, siblings, predecessor)
-            loss = local_loss + inter_loss + intra_loss
+        outputs = model(inputs)
+        local_loss, inter_loss, intra_loss = criterion(outputs, targets, model, siblings, predecessor)
+        loss = local_loss + inter_loss + intra_loss
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        losses.append(loss.item())
-        local_losses.append(local_loss.item())
-    return np.mean(losses).item(), np.mean(local_losses).item()
+        losses["train_losses"].append(loss.item())
+        losses["local_losses"].append(local_loss.item())
+        losses["inter_cluster_losses"].append(inter_loss.item())
+        losses["intra_cluster_losses"].append(intra_loss.item())
+    return {k: np.mean(v).item() for k, v in losses.items()}
 
 
 def eval_client(model, test_loader, device='cpu'):
@@ -93,19 +93,21 @@ class SOFA_FL_Client:
                                                  weight_decay=self.weight_decay) if self.optimizer_func is not None else None
 
     def local_update(self, criterion, siblings, predecessor):
-        losses = []
-        local_losses = []
+        losses = {"train_losses": [], "local_losses": [], "inter_cluster_losses": [], "intra_cluster_losses": []}
         if self.local_updates is None:
             return
         for i in range(self.local_updates):
-            loss, local_loss = train_client(self.model, self.train_loader, siblings, predecessor,
-                                            optimizer=self.optimizer,
-                                            criterion=criterion,
-                                            max_iters=self.max_iters,
-                                            device=self.device)
-            losses.append(loss)
-            local_losses.append(local_loss)
-        return self.id, losses, local_losses
+            loss = train_client(self.model,
+                                     self.train_loader,
+                                     siblings,
+                                     predecessor,
+                                     optimizer=self.optimizer,
+                                     criterion=criterion,
+                                     max_iters=self.max_iters,
+                                     device=self.device)
+            for k, v in loss.items():
+                losses[k].append(v)
+        return self.id, losses
 
     def evaluate(self):
         acccuracy = eval_client(self.model, self.test_loader, self.device)
@@ -231,7 +233,7 @@ class SOFA_FL_Server:
                            graft_tolerance=self.cfg['server']['graft_tolerance'],
                            split_threshold=self.cfg['server']['split_threshold'],
                            merge_threshold=self.cfg['server']['merge_threshold'],
-                           max_splits=self.cfg['server']['max_splits'],)
+                           max_splits=self.cfg['server']['max_splits'], )
 
         self.data_share = cfg['client']['data_share']['activate']
         if self.data_share:
@@ -389,8 +391,7 @@ class SOFA_FL_Server:
         node.centroid = client.weights_flatten()
 
     def train(self):
-        train_manager = Train_Manager(server=self, logger=self.logger, val=self.cfg["experiment"]["evaluation"],
-                                      visualize=self.cfg["output"]["mode"])
+        train_manager = Train_Manager(server=self, logger=self.logger, val=self.cfg["experiment"]["evaluation"])
         train_manager.run()
 
     def eval(self):
@@ -558,18 +559,21 @@ class Data_Share_Manager():
                 receiver.train_loader = receiver.backup_train_loader
             subsets = []
             for giver, indices in data_dict[receiver].items():
-                subset = Subset(giver.get_shareable_data().dataset, indices) if indices is not None else giver.get_shareable_data().dataset
+                subset = Subset(giver.get_shareable_data().dataset,
+                                indices) if indices is not None else giver.get_shareable_data().dataset
                 subsets.append(subset)
                 if giver.id in self.share_records[receiver.id]:
                     self.share_records[receiver.id][giver.id] = len(subset)
             if len(subsets) == 0:
                 continue
 
-            assert None not in self.share_records[receiver.id].values(), f"\n{receiver}\n{self.share_records[receiver.id]}\n{self.share_dict[receiver]}\n{data_dict[receiver]}" # DEBUG
+            assert None not in self.share_records[
+                receiver.id].values(), f"\n{receiver}\n{self.share_records[receiver.id]}\n{self.share_dict[receiver]}\n{data_dict[receiver]}"  # DEBUG
             subsets = ([receiver.train_loader.dataset] if receiver.samples() != 0 else []) + subsets
             # datasets_samples = [len(dataset) for dataset in subsets]
             dataset = ConcatDataset(subsets)
-            assert len(dataset) == sum(item for item in self.share_records[receiver.id].values()), f"{receiver}\n{len(dataset)}\n{sum(item for item in self.share_records[receiver.id].values())}\n{self.share_records_to_str()}" # DEBUG
+            assert len(dataset) == sum(item for item in self.share_records[
+                receiver.id].values()), f"{receiver}\n{len(dataset)}\n{sum(item for item in self.share_records[receiver.id].values())}\n{self.share_records_to_str()}"  # DEBUG
             data_loader = DataLoader(
                 dataset,
                 batch_size=self.server.batch_size,

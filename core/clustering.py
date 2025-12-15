@@ -257,7 +257,7 @@ class Hierarchical_Clustering:
             self.nodes.append(cluster)
             new_nodes.append(cluster)
 
-    def visualize_tree(self, name="Dendrogram", **kwargs):
+    def visualize_tree(self, **kwargs):
         positions = {}
         leaf_x_counter = 0
 
@@ -349,8 +349,8 @@ class Hierarchical_Clustering:
             height=600,
             margin=dict(t=100, b=50, l=50, r=50)
         )
-        save_dir = kwargs.get("save_dir", None)
-        save_dir = self.exp_dir if save_dir is None else save_dir
+        name = kwargs.get("name", "Dendrogram")
+        save_dir = kwargs.get("save_dir", self.exp_dir)
 
         if kwargs.get("save_plot", False):
             extension = kwargs.get("format", "html")
