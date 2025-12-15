@@ -7,16 +7,14 @@ import torch
 
 
 class PlainFormatter(logging.Formatter):
-    ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-9;]*[0-9A-Za-z])')
+    ANSI_ESCAPE = re.compile(r'\033(?:[@-Z\\-_]|\[[0-9;]*[0-9A-Za-z])')
 
     def remove_ansi_colors(self, text):
         return self.ANSI_ESCAPE.sub('', text)
 
     def format(self, record):
-        if isinstance(record.msg, str):
-            record.msg = self.remove_ansi_colors(record.msg)
-
-        return super().format(record)
+        formatted_string = super().format(record)
+        return self.remove_ansi_colors(formatted_string)
 
 
 def get_logger(name, log_dir):
