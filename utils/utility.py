@@ -7,6 +7,7 @@ import torch
 
 ANSI_ESCAPE = re.compile(r'\033(?:[@-Z\\-_]|\[[0-9;]*[0-9A-Za-z])')
 
+
 class PlainFormatter(logging.Formatter):
     def remove_ansi_colors(self, text):
         return ANSI_ESCAPE.sub('', text)
@@ -96,3 +97,9 @@ def union_find_groups(pairs):
         groups.setdefault(root, []).append(x)
 
     return list(groups.values())
+
+
+def is_required(a, b):
+    if not b:
+        return False
+    return a == b or a in b

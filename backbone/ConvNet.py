@@ -4,8 +4,6 @@ import torch.nn.functional as F
 class ConvNet(nn.Module):
     """
     A Convolutional Neural Network (CNN) for image classification, designed to work with single-channel (grayscale) images.
-
-    You may test other model architectures if you would like but DO NOT CHANGE THIS ARCHITECTURE. It will likely introduce errors
     """
     def __init__(self):
         super(ConvNet, self).__init__()
