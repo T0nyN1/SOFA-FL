@@ -133,13 +133,17 @@ class Hierarchical_Clustering:
         return self.max_index
 
     def find_centroid(self, nodes, return_n_samples=True) -> Union[torch.Tensor, int]:
-        centroids_all = torch.stack([n.centroid for n in nodes], dim=0)
-        samples_all = torch.tensor([[n.samples] for n in nodes], dtype=torch.float32, device=self.device)
-        weighted_sum = torch.sum(centroids_all * samples_all, dim=0)
-        total_samples = torch.sum(samples_all)
-        centroid = weighted_sum / total_samples
+        if nodes is None or len(nodes) == 0:
+            centroid, samples = 0, 0
+        else:
+            centroids_all = torch.stack([n.centroid for n in nodes], dim=0)
+            samples_all = torch.tensor([[n.samples] for n in nodes], dtype=torch.float32, device=self.device)
+            weighted_sum = torch.sum(centroids_all * samples_all, dim=0)
+            total_samples = torch.sum(samples_all)
+            centroid = weighted_sum / total_samples
+            samples = int(total_samples.item())
         if return_n_samples:
-            return centroid, int(total_samples.item())
+            return centroid, samples
         else:
             return centroid
 

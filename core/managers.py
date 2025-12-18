@@ -122,6 +122,7 @@ class Base_Manager():
                 target_client.model.load_state_dict(new_weights)
                 target_client.updates.load_state_dict(updates)
                 target_client.model.to(self.server.device)  # sent back to gpu, if needed
+                target_client.updates.to(self.server.device)
                 self.server.sync_client_weights(target_client)
 
         return losses
@@ -553,7 +554,7 @@ class Train_Manager(Base_Manager):
             self.visualize_clustering_evolution(self.dendrograms, duration=self.server.cfg["output"]["duration"])
 
         for key in self.stats:
-            if key == "val_accuracies" or "model_distribution":
+            if key in ["val_accuracies", "model_distribution"]:
                 continue
             if is_required(key, self.save_plots):
                 self.visualize_train_losses(key,

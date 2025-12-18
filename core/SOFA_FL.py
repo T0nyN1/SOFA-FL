@@ -424,18 +424,22 @@ class SOFA_FL_Server:
             self._update_test_data(self.node_to_client(node), successors_clients)
         self._update_ws([self.node_to_client(self.structure.root())])
 
-        for client in self.clients:
-            if (node := self.client_to_node(client)).is_leaf():
+        for node in sorted(self.structure.nodes, key=lambda n: n.level):
+            if node.is_leaf():
                 continue
+            client = self.node_to_client(node)
             successors_clients = [self.node_to_client(n) for n in node.successors]
             updates = self.aggregate_weights(successors_clients, attr="updates")
             state_dict = client.model.state_dict()
             for key in state_dict.keys():
                 value = updates.state_dict()[key]
                 if value.is_floating_point():
-                    state_dict[key] -= self.eta * value.to(self.device)
+                    delta_weights = self.eta * value
+                    state_dict[key] -= delta_weights
+                    client.updates.state_dict()[key] += delta_weights
                 else:
                     state_dict[key] += value
+                    client.updates.state_dict()[key] += value
             client.model.load_state_dict(state_dict)
 
         self._update_snapshots()
