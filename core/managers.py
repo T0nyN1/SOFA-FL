@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from core.loss import SOFA_FL_Loss
+from utils.utility import is_required
 
 title_dict = {"train_losses": "Training Loss",
               "local_losses": "Local Objective",
@@ -40,7 +41,7 @@ class Base_Manager():
         local_objective = self.get_local_objective(self.server.cfg['train']['local_objective'])
         criterion = SOFA_FL_Loss(local_objective, self.server.cfg['train']['alpha'],
                                  self.server.cfg['train']['beta'])
-        predecessor_node = self.server.architecture.find_predecessor(self.server.client_to_node(client))
+        predecessor_node = self.server.structure.find_predecessor(self.server.client_to_node(client))
         if predecessor_node is None:
             predecessor_weight = None
             siblings_weights = None
@@ -59,7 +60,8 @@ class Base_Manager():
             if client.samples() == 0:
                 continue
 
-            id, loss = client.local_update(*self._instantiate_criterion(client))
+            id, updates, loss = client.local_update(*self._instantiate_criterion(client))
+            client.updates = updates
             self.server.sync_client_weights(client)
             for k, v in loss.items():
                 losses[k][id] = v
@@ -75,12 +77,12 @@ class Base_Manager():
         client.assign_optimizer()
         siblings_clients = [w.to(device) for w in siblings_clients] if siblings_clients is not None else None
         predecessor_client = predecessor_client.to(device) if predecessor_client is not None else None
-
-        client_id, losses = client.local_update(criterion, siblings_clients, predecessor_client)
+        client_id, updates, losses = client.local_update(criterion, siblings_clients, predecessor_client)
 
         updated_weights = {k: v.cpu() for k, v in client.model.state_dict().items()}
+        updates = {k: v.cpu() for k, v in updates.items()}
 
-        return client_id, losses, updated_weights
+        return client_id, losses, updated_weights, updates
 
     def train_one_round_parallel(self):
         MAX_WORKERS = self.server.cfg['experiment']['num_workers']
@@ -89,6 +91,7 @@ class Base_Manager():
 
         for client in selected_clients:
             client.model.to('cpu')
+            client.updates.to('cpu')
             client.model.zero_grad(set_to_none=True)
             client.optimizer = None
 
@@ -111,12 +114,13 @@ class Base_Manager():
                 desc=f"Round {self.round} | Parallel Updating"
             ))
 
-        for client_id, loss, new_weights in results:
+        for client_id, loss, new_weights, updates in results:
             for k, v in loss.items():
                 losses[k][client_id] = v
             target_client = next((c for c in self.server.clients if c.id == client_id), None)
             if target_client:
                 target_client.model.load_state_dict(new_weights)
+                target_client.updates.load_state_dict(updates)
                 target_client.model.to(self.server.device)  # sent back to gpu, if needed
                 self.server.sync_client_weights(target_client)
 
@@ -129,19 +133,9 @@ class Base_Manager():
             losses = self.train_one_round()
         return losses
 
-    # DEBUG
-    def _check_tree_validity(self):
-        for node in self.server.architecture.nodes:
-            if node.is_leaf():
-                continue
-            else:
-                assert node.samples == sum([s.samples for s in
-                                            node.successors]), f"{node} {node.samples} {sum([s.samples for s in node.successors])}"
-
     def _init_clustering(self):
-        self.server.architecture.fit()
-        self._check_tree_validity()  # DEBUG
-        self.server.update_clients()
+        self.server.structure.fit()
+        self.server.initialize_clients()
         if self.server.data_share:
             self.server.data_share_manager.backup_train_loader()
             self.server.data_share_manager.initialize()
@@ -149,11 +143,7 @@ class Base_Manager():
 
     def _update_clustering(self):
         self.server.shape.run()
-        self._check_tree_validity()  # DEBUG
         self.server.update_clients()
-        # DEBUG
-        assert set(self.server.clients_dict.keys()) == set(
-            self.server.architecture.nodes_dict.keys()), f"{set(self.server.clients_dict.keys())}\n{set(self.server.architecture.nodes_dict.keys())}\n{self.server}\n{self.server.architecture}"
         if self.server.data_share:
             self.server.data_share_manager.update()
             self.server.data_share_manager.share()
@@ -193,6 +183,7 @@ class Base_Manager():
 
         for client in self.server.clients:
             client.model.to('cpu')
+            client.updates.to('cpu')
             client.optimizer = None
 
             if hasattr(client, 'w') and isinstance(client.w, torch.Tensor):
@@ -235,22 +226,17 @@ class Train_Manager(Base_Manager):
         self.export_type = self.server.cfg['output']['export_statistics']
 
         self.show_plots = self.server.cfg['output']['show_plots']
-        self.show_arch = self._is_required("architecture", self.show_plots)
+        self.show_structure = is_required("structure", self.show_plots)
 
         self.save_plots = self.server.cfg['output']['save_plots']
         self.format = self.server.cfg['output']['format']
         self.w, self.h = self.server.cfg['output']['image_size']
         self.duration = self.server.cfg['output']['duration']
-        self.save_arch = self._is_required("architecture", self.save_plots)
+        self.save_structure = is_required("structure", self.save_plots)
 
         self.dendrograms = []
         self.stats = {"train_losses": [], "val_accuracies": [], "local_losses": [], "inter_cluster_losses": [],
                       "intra_cluster_losses": []}
-
-    def _is_required(self, a, b):
-        if not b:
-            return False
-        return a == b or a in b
 
     def _update_stats(self, key, values):
         self.stats[key].append(values)
@@ -273,14 +259,14 @@ class Train_Manager(Base_Manager):
         for k, v in losses.items():
             self._update_stats(k, v)
         self._update_clustering()
-        if self.save_arch:
-            img = self.server.architecture.visualize_tree(return_img=self.save_arch,
-                                                          width=self.w,
-                                                          height=self.h,
-                                                          show=self.show_arch)
+        if self.save_structure:
+            img = self.server.structure.visualize_tree(return_img=self.save_structure,
+                                                       width=self.w,
+                                                       height=self.h,
+                                                       show=self.show_structure)
             self.dendrograms.append(img)
-        elif self.show_arch:
-            self.server.architecture.visualize_tree(show=True)
+        elif self.show_structure:
+            self.server.structure.visualize_tree(show=True)
 
         if self.val:
             accuracies = self.evaluate()
@@ -289,7 +275,7 @@ class Train_Manager(Base_Manager):
     def run(self):
         def _console_output(gap=10):
             server_str = self.server.__repr__().split('\n')
-            arch_str = self.server.architecture.__repr__().split('\n')
+            arch_str = self.server.structure.__repr__().split('\n')
             length = max([len(line) for line in server_str])
             info = [f"{a:<{length + gap}}{b}" for a, b in zip_longest(server_str, arch_str, fillvalue="")]
             self.logger.info(f"Round {self.round}:\n{"\n".join(info)}")
@@ -302,16 +288,16 @@ class Train_Manager(Base_Manager):
         if self.val:
             accuracies = self.evaluate()
             self._update_stats("val_accuracies", accuracies)
-        self.logger.info("Forming server architecture...")
+        self.logger.info("Forming server structure...")
         self._init_clustering()
-        if self.save_arch:
-            img = self.server.architecture.visualize_tree(return_img=self.save_arch,
-                                                          width=self.w,
-                                                          height=self.h,
-                                                          show=self.show_arch)
+        if self.save_structure:
+            img = self.server.structure.visualize_tree(return_img=self.save_structure,
+                                                       width=self.w,
+                                                       height=self.h,
+                                                       show=self.show_structure)
             self.dendrograms.append(img)
-        elif self.show_arch:
-            self.server.architecture.visualize_tree(show=True)
+        elif self.show_structure:
+            self.server.structure.visualize_tree(show=True)
 
         _console_output()
         for i in range(self.server.comm_rounds - 1):
@@ -559,33 +545,42 @@ class Train_Manager(Base_Manager):
                         duration=duration)
 
     def visualize(self):
-        if self.save_arch:
-            self.server.architecture.visualize_tree(save_plot=True,
-                                                    format=self.format,
-                                                    width=self.w,
-                                                    height=self.h)
+        if self.save_structure:
+            self.server.structure.visualize_tree(save_plot=True,
+                                                 format=self.format,
+                                                 width=self.w,
+                                                 height=self.h)
             self.visualize_clustering_evolution(self.dendrograms, duration=self.server.cfg["output"]["duration"])
 
         for key in self.stats:
-            if key == "val_accuracies":
+            if key == "val_accuracies" or "model_distribution":
                 continue
-            if self._is_required(key, self.save_plots):
+            if is_required(key, self.save_plots):
                 self.visualize_train_losses(key,
-                                            show=self._is_required(key, self.show_plots),
+                                            show=is_required(key, self.show_plots),
                                             save_plot=True,
                                             format=self.format,
                                             width=self.w,
                                             height=self.h)
-            elif self._is_required(key, self.show_plots):
+            elif is_required(key, self.show_plots):
                 self.visualize_train_losses(key, show=True)
+        if is_required("model_distribution", self.save_plots):
+            self.server.visualize_model_distribution(show=is_required("model_distribution", self.show_plots),
+                                                     save_plot=True,
+                                                     format=self.format,
+                                                     width=self.w,
+                                                     height=self.h)
+        elif is_required("model_distribution", self.show_plots):
+            self.server.visualize_model_distribution(show=True)
+
         if self.val:
-            if self._is_required("val_accuracies", self.save_plots):
-                self.visualize_val_accuracy(show=self._is_required("val_accuracies", self.show_plots),
+            if is_required("val_accuracies", self.save_plots):
+                self.visualize_val_accuracy(show=is_required("val_accuracies", self.show_plots),
                                             save_plot=True,
                                             format=self.format,
                                             width=self.w,
                                             height=self.h)
-            elif self._is_required("val_accuracies", self.show_plots):
+            elif is_required("val_accuracies", self.show_plots):
                 self.visualize_val_accuracy(show=True)
 
     def export_stats_to_csv(self, stats_type, **kwargs):
@@ -620,7 +615,7 @@ class Train_Manager(Base_Manager):
 
     def export(self):
         for key in self.stats:
-            if self._is_required(key, self.export_type):
+            if is_required(key, self.export_type):
                 self.export_stats_to_csv(key)
 
 

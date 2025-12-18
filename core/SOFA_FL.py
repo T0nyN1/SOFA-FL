@@ -1,16 +1,20 @@
 import copy
+import os
 import re
 from itertools import zip_longest
 from typing import Union, List, Dict
 
 import numpy as np
+import plotly.graph_objects as go
 import torch
 from lightning.pytorch.utilities.combined_loader import CombinedLoader
+from sklearn.decomposition import PCA
 from torch.utils.data import DataLoader, Subset, ConcatDataset
 
 from core.clustering import Hierarchical_Clustering, SHAPE
 from core.managers import Train_Manager, Evaluation_Manager
 from utils.dataset import partition_dataset
+from utils.utility import is_required
 
 
 def train_client(model, train_loader, siblings, predecessor, optimizer, criterion, max_iters=None, device='cpu'):
@@ -84,6 +88,8 @@ class SOFA_FL_Client:
         self.device = device
         self.w = None
 
+        self.updates = copy.deepcopy(self.model).to(self.device)
+
     def __repr__(self):
         return f"<SOFA_FL_Client(id={self.id}, w={self.w}, samples={self.samples()})>"
 
@@ -93,21 +99,30 @@ class SOFA_FL_Client:
                                                  weight_decay=self.weight_decay) if self.optimizer_func is not None else None
 
     def local_update(self, criterion, siblings, predecessor):
+        prev_model = copy.deepcopy(self.model).to(self.device)
+
         losses = {"train_losses": [], "local_losses": [], "inter_cluster_losses": [], "intra_cluster_losses": []}
         if self.local_updates is None:
             return
         for i in range(self.local_updates):
             loss = train_client(self.model,
-                                     self.train_loader,
-                                     siblings,
-                                     predecessor,
-                                     optimizer=self.optimizer,
-                                     criterion=criterion,
-                                     max_iters=self.max_iters,
-                                     device=self.device)
+                                self.train_loader,
+                                siblings,
+                                predecessor,
+                                optimizer=self.optimizer,
+                                criterion=criterion,
+                                max_iters=self.max_iters,
+                                device=self.device)
             for k, v in loss.items():
                 losses[k].append(v)
-        return self.id, losses
+
+        updates = {}
+        for key, value in prev_model.state_dict().items():
+            if value.is_floating_point():
+                updates[key] = value - self.model.state_dict()[key]
+            else:
+                updates[key] = self.model.state_dict()[key]
+        return self.id, updates, losses
 
     def evaluate(self):
         acccuracy = eval_client(self.model, self.test_loader, self.device)
@@ -147,6 +162,7 @@ class SOFA_FL_Server:
         self.local_updates = cfg['client']['local_updates']
         self.max_iters = cfg['client']['max_iters']
         self.alpha = cfg['data']['alpha']
+        self.eta = torch.tensor(cfg['server']['eta'])
         self.seed = cfg['experiment']['seed']
         self.cfg = cfg
         self.device = torch.device(cfg['experiment']['device'])
@@ -156,9 +172,10 @@ class SOFA_FL_Server:
         Y_train = np.array(train_set.targets)
         Y_test = np.array(test_set.targets)
         if n_clients == 1:
-            # FIXME: variable reference.
+            logger.warning(
+                f"SOFA-FL server has only one active client; hierarchical architecture has degraded to a single-node structure.")
             clients_train_loaders = [DataLoader(dataset=train_set, batch_size=self.batch_size, shuffle=True)]
-            clients_test_loader = [DataLoader(dataset=test_set, batch_size=self.batch_size, shuffle=False)]
+            clients_test_loaders = [DataLoader(dataset=test_set, batch_size=self.batch_size, shuffle=False)]
             train_distribution, test_distribution = "", ""
         else:
             clients_datasets, class_allocation, train_distribution = partition_dataset(
@@ -178,8 +195,6 @@ class SOFA_FL_Server:
             )
             clients_train_loaders = [DataLoader(client_dataset, batch_size=self.batch_size, shuffle=True) for
                                      client_dataset in clients_datasets]
-            # FIXME: DELETE after completion of implementation.
-            # clients_test_loader = DataLoader(test_set, batch_size=self.batch_size, shuffle=False)
             clients_test_loaders = [DataLoader(d, batch_size=self.batch_size, shuffle=False) for d in
                                     clients_test_datasets]
 
@@ -221,15 +236,15 @@ class SOFA_FL_Server:
 
         clients_weights_list = [client.weights_flatten() for client in self.clients]
         samples = [client.samples() for client in self.clients]
-        self.architecture = Hierarchical_Clustering(clients_weights_list, samples,
-                                                    type=self.cfg['server']['cluster_type'],
-                                                    distance=self.cfg['server']['distance_metric'],
-                                                    threshold=self.cfg['server']['threshold'],
-                                                    increment_factor=self.cfg['server']['increment_factor'],
-                                                    device=self.device,
-                                                    exp_dir=self.cfg['experiment']['experiment_dir'],
-                                                    logger=self.logger)
-        self.shape = SHAPE(tree=self.architecture,
+        self.structure = Hierarchical_Clustering(clients_weights_list, samples,
+                                                 type=self.cfg['server']['cluster_type'],
+                                                 distance=self.cfg['server']['distance_metric'],
+                                                 threshold=self.cfg['server']['threshold'],
+                                                 increment_factor=self.cfg['server']['increment_factor'],
+                                                 device=self.device,
+                                                 exp_dir=self.cfg['experiment']['experiment_dir'],
+                                                 logger=self.logger)
+        self.shape = SHAPE(tree=self.structure,
                            graft_tolerance=self.cfg['server']['graft_tolerance'],
                            split_threshold=self.cfg['server']['split_threshold'],
                            merge_threshold=self.cfg['server']['merge_threshold'],
@@ -253,6 +268,12 @@ class SOFA_FL_Server:
 
         self.logger.info(f"Server initialized.")
 
+        self.show_model_distribution = is_required("model_distribution", self.cfg['output']['show_plots'])
+        self.save_model_distribution = is_required("model_distribution", self.cfg['output']['save_plots'])
+        if self.save_model_distribution or self.show_model_distribution:
+            self.model_snapshots = []
+            self.children_snapshots = []
+
     def __repr__(self):
         return "<SOFA_FL_Server>\nClients:\n" + "\n".join(
             [c.__repr__() for c in sorted(self.clients, key=lambda c: c.id)])
@@ -265,10 +286,10 @@ class SOFA_FL_Server:
             client_id = client
         else:
             client_id = client.id
-        if client_id not in self.architecture.nodes_dict.keys():
+        if client_id not in self.structure.nodes_dict.keys():
             return None
-        index = self.architecture.nodes_dict[client_id]
-        return self.architecture.nodes[index]
+        index = self.structure.nodes_dict[client_id]
+        return self.structure.nodes[index]
 
     def node_to_client(self, node: Union[SOFA_FL_Client, int]):
         if isinstance(node, int):
@@ -280,13 +301,18 @@ class SOFA_FL_Server:
         index = self.clients_dict[node_index]
         return self.clients[index]
 
-    def aggregate_weights(self, clients):
+    def aggregate_weights(self, clients, attr="model"):
         model = copy.deepcopy(clients[0].model)
         state_dict = model.state_dict()
+
+        client_state_dicts = [
+            {k: v.to(self.device) * client.w if v.is_floating_point() else v.to(self.device) for k, v in
+             getattr(client, attr).state_dict().items()}
+            for client in clients
+        ]
+
         for key in state_dict.keys():
-            state_dict[key] = torch.sum(
-                torch.stack([client.model.state_dict()[key].clone().to(self.device) * client.w for client in clients]),
-                dim=0)
+            state_dict[key] = torch.sum(torch.stack([client_dict[key] for client_dict in client_state_dicts]), dim=0)
         model.load_state_dict(state_dict)
         return model
 
@@ -298,7 +324,9 @@ class SOFA_FL_Server:
         ws = [w / w_sum for w in ws]
 
         for key in state_dict.keys():
-            state_dict[key] = sum([ws[i] * clients[i].model.state_dict()[key] for i in range(len(clients))])
+            state_dict[key] = sum(
+                [ws[i] * value if (value := clients[i].model.state_dict()[key]).is_floating_point() else value for i in
+                 range(len(clients))])
         model.load_state_dict(state_dict)
         return model
 
@@ -324,16 +352,51 @@ class SOFA_FL_Server:
         combined_test_loader = CombinedLoader(test_loaders, mode="sequential")
         client.test_loader = combined_test_loader
 
+    def _update_snapshots(self):
+        if not (hasattr(self, "model_snapshots") and hasattr(self, "children_snapshots")):
+            pass
+        else:
+            self.model_snapshots.append({client.id: client.weights_flatten().cpu().numpy() for client in self.clients})
+            self.children_snapshots.append(
+                {client.id: [n.index for n in node.get_children()] for client in self.clients if
+                 not (node := self.client_to_node(client)).is_leaf()})
+
+    def initialize_clients(self):
+        new_nodes = self.structure.nodes[len(self.clients):]
+        for node in new_nodes:
+            successors_indices = [n.index for n in node.successors]
+            successor_clients = [self.clients[id] for id in successors_indices]
+            self._update_ws(successor_clients)
+            self.clients.append(
+                SOFA_FL_Client(node.index,
+                               model=self.aggregate_weights(successor_clients),
+                               train_loader=None,
+                               test_loader=None,
+                               optimizer=None,
+                               lr=0,
+                               weight_decay=0,
+                               local_updates=None,
+                               max_iters=None,
+                               privacy=None,
+                               device=self.device))
+        self._update_ws([self.clients[-1]])
+        self.update_clients_dict()
+        self._update_snapshots()
+
     def update_clients(self):
-        if self.shape.log is None:
-            new_nodes = self.architecture.nodes[len(self.clients):]
-            for node in new_nodes:
-                successors_indices = [n.index for n in node.successors]
-                successor_clients = [self.clients[id] for id in successors_indices]
-                self._update_ws(successor_clients)
+        for node in self.shape.log.keys():
+            weights = None
+            if len(self.shape.log[node]) >= 2:
+                clients = [self.node_to_client(n) for n in self.shape.log[node]]
+                weights = self.merge_weights(clients)
+            elif len(self.shape.log[node]) == 1:
+                client = self.node_to_client(self.shape.log[node][0])
+                weights = self.copy_weights(client)
+
+            if weights is not None:
                 self.clients.append(
                     SOFA_FL_Client(node.index,
-                                   model=self.aggregate_weights(successor_clients),
+                                   model=weights,
                                    train_loader=None,
                                    test_loader=None,
                                    optimizer=None,
@@ -343,48 +406,39 @@ class SOFA_FL_Server:
                                    max_iters=None,
                                    privacy=None,
                                    device=self.device))
-            self._update_ws([self.clients[-1]])
-            self.update_clients_dict()
-        else:
-            for node in self.shape.log.keys():
-                weights = None
-                if len(self.shape.log[node]) >= 2:
-                    clients = [self.node_to_client(n) for n in self.shape.log[node]]
-                    weights = self.merge_weights(clients)
-                elif len(self.shape.log[node]) == 1:
-                    client = self.node_to_client(self.shape.log[node][0])
-                    weights = self.copy_weights(client)
+                self.update_clients_dict()
 
-                if weights is not None:
-                    self.clients.append(
-                        SOFA_FL_Client(node.index,
-                                       model=weights,
-                                       train_loader=None,
-                                       test_loader=None,
-                                       optimizer=None,
-                                       lr=0,
-                                       weight_decay=0,
-                                       local_updates=None,
-                                       max_iters=None,
-                                       privacy=None,
-                                       device=self.device))
+        for node in self.shape.log.keys():
+            if len(self.shape.log[node]) == 0:
+                client = self.node_to_client(node)
+                if client is not None:
+                    self.clients.remove(client)
                     self.update_clients_dict()
 
-            for node in self.shape.log.keys():
-                if len(self.shape.log[node]) == 0:
-                    client = self.node_to_client(node)
-                    if client is not None:
-                        self.clients.remove(client)
-                        self.update_clients_dict()
+        for node in sorted(self.structure.nodes, key=lambda n: n.level):
+            if node.is_leaf():
+                continue
+            successors = node.successors
+            successors_clients = [self.node_to_client(s) for s in successors]
+            self._update_ws(successors_clients)
+            self._update_test_data(self.node_to_client(node), successors_clients)
+        self._update_ws([self.node_to_client(self.structure.root())])
 
-            for node in sorted(self.architecture.nodes, key=lambda n: n.level):
-                if node.is_leaf():
-                    continue
-                successors = node.successors
-                successors_clients = [self.node_to_client(s) for s in successors]
-                self._update_ws(successors_clients)
-                self._update_test_data(self.node_to_client(node), successors_clients)
-            self._update_ws([self.node_to_client(self.architecture.root())])
+        for client in self.clients:
+            if (node := self.client_to_node(client)).is_leaf():
+                continue
+            successors_clients = [self.node_to_client(n) for n in node.successors]
+            updates = self.aggregate_weights(successors_clients, attr="updates")
+            state_dict = client.model.state_dict()
+            for key in state_dict.keys():
+                value = updates.state_dict()[key]
+                if value.is_floating_point():
+                    state_dict[key] -= self.eta * value.to(self.device)
+                else:
+                    state_dict[key] += value
+            client.model.load_state_dict(state_dict)
+
+        self._update_snapshots()
 
     def sync_client_weights(self, client):
         node = self.client_to_node(client)
@@ -397,6 +451,123 @@ class SOFA_FL_Server:
     def eval(self):
         eval_manager = Evaluation_Manager(server=self, logger=self.logger)
         eval_manager.run()
+
+    def visualize_model_distribution(self, **kwargs):
+        pca = PCA(n_components=2)
+        ids = [key for item in self.model_snapshots for key in item]
+        lengths = np.cumsum([len(item) for item in self.model_snapshots])
+        data = np.vstack([value for item in self.model_snapshots for value in item.values()])
+        points = pca.fit_transform(data)
+
+        index = 0
+        results = [{}]
+        for i, point in enumerate(points):
+            if not i < lengths[index]:
+                index += 1
+                results.append({})
+            results[-1][ids[i]] = point
+
+        xs = [p[0] for round_dict in results for p in round_dict.values()]
+        ys = [p[1] for round_dict in results for p in round_dict.values()]
+        x_range = [min(xs) - 0.1, max(xs) + 0.1]
+        y_range = [min(ys) - 0.1, max(ys) + 0.1]
+
+        def make_circle(center, radius, n_points=100):
+            theta = np.linspace(0, 2 * np.pi, n_points)
+            x = center[0] + radius * np.cos(theta)
+            y = center[1] + radius * np.sin(theta)
+            return x, y
+
+        def get_clusters_points(round: int, round_dict: dict):
+            clusters = {}
+            records = self.children_snapshots[round]
+            for id, point in round_dict.items():
+                if id not in records:
+                    continue
+                children_indices = records[id]
+                clusters[id] = [round_dict[index] for index in children_indices] + [round_dict[id]]
+            return clusters
+
+        frames = []
+        for i, round_dict in enumerate(results):
+            frame_data = [
+                go.Scatter(
+                    x=[p[0] for p in round_dict.values()],
+                    y=[p[1] for p in round_dict.values()],
+                    mode="markers",
+                    marker=dict(size=8),
+                    showlegend=False,
+                    text=[f"id: {id}<br>({p[0]:.3f}, {p[1]:.3f})" for id, p in round_dict.items()],
+                    hoverinfo="text",
+                )
+            ]
+
+            for points in get_clusters_points(i, round_dict).values():
+                points_array = np.array(points)
+                center = np.mean(points_array, axis=0)
+                radius = np.max(np.linalg.norm(points_array - center, axis=1)) + 0.1
+                circle_x, circle_y = make_circle(center, radius)
+                frame_data.append(
+                    go.Scatter(
+                        x=circle_x,
+                        y=circle_y,
+                        mode="lines",
+                        line=dict(dash="dash", color="gray"),
+                        showlegend=False,
+                        hoverinfo="none",
+                    )
+                )
+
+            frames.append(go.Frame(name=f"round_{i}", data=frame_data))
+
+        fig = go.Figure(
+            data=frames[0].data,
+            layout=go.Layout(
+                title="Model Distribution over Rounds",
+                xaxis=dict(range=x_range, title="PC1"),
+                yaxis=dict(range=y_range, title="PC2"),
+                updatemenus=[
+                    dict(
+                        type="buttons",
+                        buttons=[
+                            dict(
+                                label="Play",
+                                method="animate",
+                                args=[None, {"frame": {"duration": 500, "redraw": True}, "fromcurrent": True}],
+                            ),
+                            dict(
+                                label="Pause",
+                                method="animate",
+                                args=[[None], {"frame": {"duration": 0}, "mode": "immediate"}],
+                            ),
+                        ],
+                    )
+                ],
+                sliders=[
+                    dict(
+                        steps=[
+                            dict(
+                                method="animate",
+                                args=[[f"round_{i}"], {"frame": {"duration": 0, "redraw": True}}],
+                                label=f"Round {i}",
+                            )
+                            for i in range(len(results))
+                        ],
+                        active=0,
+                    )
+                ],
+            ),
+            frames=frames,
+        )
+
+        name = kwargs.get("name", "model_distribution")
+        save_dir = kwargs.get("save_dir", self.cfg['experiment']['experiment_dir'])
+
+        if kwargs.get("save_plot", False):
+            fig.write_html(os.path.join(save_dir, f"{name}.html"))
+
+        if kwargs.get("show", False):
+            fig.show()
 
 
 class Data_Share_Manager():
@@ -458,7 +629,7 @@ class Data_Share_Manager():
         giver_node = self.server.client_to_node(giver)
         if receiver_node.is_leaf():
             return False
-            # return self.server.architecture.find_predecessor(receiver_node) == self.server.architecture.find_predecessor(giver_node)
+            # return self.server.structure.find_predecessor(receiver_node) == self.server.structure.find_predecessor(giver_node)
         else:
             if receiver.id in self.share_records and giver.id in self.share_records[receiver.id]:
                 return False
@@ -471,7 +642,7 @@ class Data_Share_Manager():
         shareable_clients_weights = torch.stack(
             [c.weights_flatten().to(self.server.device) for c in self.server.clients[:self.server.n_clients]])
         all_clients_weights = torch.stack([c.weights_flatten().to(self.server.device) for c in self.server.clients])
-        D = self.server.architecture.distance_measure(all_clients_weights, shareable_clients_weights)
+        D = self.server.structure.distance_measure(all_clients_weights, shareable_clients_weights)
         for i, receiver in enumerate(self.server.clients):
             d = D[i]
             for j, distance in enumerate(d):
@@ -517,21 +688,14 @@ class Data_Share_Manager():
                 self.share_records[client.id] = self.share_records[client_prev.id].copy()
         for receiver in new_share_dict:
             receiver_node = self.server.client_to_node(receiver)
-            try:
-                if receiver_node.is_leaf():
-                    continue
-            except AttributeError:
-                print(receiver)
-                print(new_share_dict)
-                print(self.server.clients_dict)
-                print(self.server.architecture.nodes_dict)
-                raise AttributeError
+            if receiver_node.is_leaf():
+                continue
             leaf_clients = [self.server.node_to_client(n) for n in receiver_node.get_leaves()]
             receiver_weight = torch.stack([receiver.weights_flatten().to(self.server.device)])
             for client in leaf_clients:
                 if self._validate_receiver_and_giver(receiver, client):
                     client_weight = torch.stack([client.weights_flatten().to(self.server.device)])
-                    distance = self.server.architecture.distance_measure(receiver_weight, client_weight)
+                    distance = self.server.structure.distance_measure(receiver_weight, client_weight)
                     s = self._calculate_s(distance)
                     new_share_dict[receiver][client] = np.clip(s, 0, client.privacy).item()
                     assert new_share_dict[receiver][client] != 0, f"{s}, {client.privacy}"

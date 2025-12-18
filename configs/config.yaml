@@ -20,6 +20,7 @@ train:
 server:
   n_clients: 20
   comm_rounds: 20
+  eta: 1
   cluster_type: 'dmac'
   distance_metric: 'euclidean'
   threshold: 0.1 # suggested range for MNIST: [0.01, 0.2]
@@ -52,7 +53,7 @@ data:
 output:
   export_statistics: ["train_losses", "local_losses", "val_accuracies"]
   show_plots: off # [...]
-  save_plots: ["architecture", "train_losses", "local_losses", "inter_cluster_losses", "intra_cluster_losses", "val_accuracies"]
+  save_plots: ["structure", "train_losses", "local_losses", "inter_cluster_losses", "intra_cluster_losses", "val_accuracies", "model_distribution"]
   format: "jpg"
   image_size: [1000, 600]
   duration: 2
