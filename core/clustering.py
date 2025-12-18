@@ -34,6 +34,15 @@ class Cluster_Node:
             leaves.extend(successor.get_leaves())
         return leaves
 
+    def get_children(self):
+        queue = self.successors.copy()
+        children = []
+        while queue:
+            node = queue.pop(0)
+            children.append(node)
+            queue.extend(node.successors)
+        return children
+
     def __repr__(self):
         return f"<Cluster_Node(index={self.index}, level={self.level}, centroid={str(self.centroid).replace("\n      ", "")}, samples={self.samples}, successors={[n.index for n in self.successors] if self.successors else None})>"
 
@@ -85,10 +94,10 @@ class Hierarchical_Clustering:
         self.nodes_dict = self.clients_dict = {n.index: i for i, n in enumerate(self.nodes)}
 
     def root(self) -> Cluster_Node:
-        return self._find_nodes_of_level(max([n.level for n in self.nodes]))[0]
+        return self.find_nodes_of_level(max([n.level for n in self.nodes]))[0]
 
     def clients(self) -> List[Cluster_Node]:
-        return self._find_nodes_of_level(0)
+        return self.find_nodes_of_level(0)
 
     def add_node(self, node):
         index = self._increment_index()
@@ -145,7 +154,7 @@ class Hierarchical_Clustering:
             matrix_norm = matrix.clone()
         return matrix_norm
 
-    def _find_nodes_of_level(self, level: int) -> List[Cluster_Node]:
+    def find_nodes_of_level(self, level: int) -> List[Cluster_Node]:
         return [n for n in self.nodes if n.level == level]
 
     def find_predecessor(self, node):
@@ -165,7 +174,7 @@ class Hierarchical_Clustering:
                 continue
             else:
                 s.append(f"{level} -> {current_level}")
-                nodes = self._find_nodes_of_level(level)
+                nodes = self.find_nodes_of_level(level)
                 for node in nodes:
                     node.level = current_level
         return "Normalize levels: " + ", ".join(s) if len(s) > 0 else ""
@@ -349,7 +358,7 @@ class Hierarchical_Clustering:
             height=600,
             margin=dict(t=100, b=50, l=50, r=50)
         )
-        name = kwargs.get("name", "Dendrogram")
+        name = kwargs.get("name", "dendrogram")
         save_dir = kwargs.get("save_dir", self.exp_dir)
 
         if kwargs.get("save_plot", False):
@@ -500,23 +509,15 @@ class SHAPE:
         self.drop(root)
         self.drop(node)
 
-    def _check_tree_validity(self):
-        for node in self.tree.nodes:
-            if node.is_leaf():
-                continue
-            else:
-                assert node.samples == sum([s.samples for s in
-                                            node.successors]), f"{node} {node.samples} {sum([s.samples for s in node.successors])}"
-
     def run(self):
         self.log = {}
         max_level = self.tree.root().level
         for l in range(max_level - 1):
-            nodes = self.tree._find_nodes_of_level(l)
+            nodes = self.tree.find_nodes_of_level(l)
             if len(nodes) == 0:
                 continue
             nodes_centroids = torch.stack([n.centroid for n in nodes]).to(self.tree.device)
-            parents = self.tree._find_nodes_of_level(l + 1)
+            parents = self.tree.find_nodes_of_level(l + 1)
             # TODO: level completed deleted.
             if len(parents) == 0:
                 continue
@@ -534,7 +535,7 @@ class SHAPE:
                 self.graft(node, parent)
 
         for l in range(1, max_level - 1):
-            nodes = self.tree._find_nodes_of_level(l)
+            nodes = self.tree.find_nodes_of_level(l)
             if len(nodes) == 0:
                 continue
             centroids = torch.stack([n.centroid for n in nodes]).to(self.tree.device)
@@ -549,16 +550,12 @@ class SHAPE:
                 self.tree.logger.info(f"Merge: {" + ".join([str(n.index) for n in group])} -> {node.index}")
 
         for l in range(1, max_level):
-            nodes = self.tree._find_nodes_of_level(l)
+            nodes = self.tree.find_nodes_of_level(l)
             for node in nodes:
                 if self.incoherence(node) > self.split_threshold and len(
-                        node.successors) >= 2:  # FIXME: why node with one successor has incoherence != 0???
+                        node.successors) >= 2:
                     new_nodes = self.split(node, self.max_splits)
-                    try:
-                        self.tree.logger.info(f"Split: {node.index} -> {[n.index for n in new_nodes]}")
-                    except TypeError:
-                        print(new_nodes)
-                        raise TypeError
+                    self.tree.logger.info(f"Split: {node.index} -> {[n.index for n in new_nodes]}")
 
         for node in self.tree.nodes.copy():
             if node.is_leaf() or node == self.tree.root():
