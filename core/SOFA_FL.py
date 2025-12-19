@@ -89,8 +89,7 @@ class SOFA_FL_Client:
         self.w = None
 
         self.updates = copy.deepcopy(self.model).to(self.device)
-        for p in self.updates.parameters():
-            p.data.zero_()
+        self.reset_updates()
 
     def __repr__(self):
         return f"<SOFA_FL_Client(id={self.id}, w={self.w}, samples={self.samples()})>"
@@ -99,6 +98,10 @@ class SOFA_FL_Client:
         if self.optimizer is None:
             self.optimizer = self.optimizer_func(self.model.parameters(), lr=self.lr,
                                                  weight_decay=self.weight_decay) if self.optimizer_func is not None else None
+
+    def reset_updates(self):
+        for p in self.updates.parameters():
+            p.data.zero_()
 
     def local_update(self, criterion, siblings, predecessor):
         prev_model = copy.deepcopy(self.model).to(self.device)
@@ -268,6 +271,10 @@ class SOFA_FL_Server:
                                                          gamma=self.cfg['client']['data_share']['gamma'])
             for client in self.clients:
                 client.initialize_share_loader()
+        else:
+            if self.eta != 1:
+                self.logger.warning("Data sharing not enabled, defaulting aggregation weight (eta) to 1.0")
+                self.eta = torch.tensor(1.0)
 
         self.logger.info(f"Server initialized.")
 
@@ -412,6 +419,9 @@ class SOFA_FL_Server:
                         updates_state_dict[key] += delta_clients
                 client.model.load_state_dict(model_state_dict)
                 client.updates.load_state_dict(updates_state_dict)
+
+        for client in self.clients:
+            client.reset_updates()
 
         # Approach 2: direct successor + leaf clients
         # for node in sorted(self.structure.nodes, key=lambda n: n.level):
