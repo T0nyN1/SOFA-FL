@@ -211,6 +211,10 @@ class Base_Manager():
         for client_id, accuracy in results:
             accuracies[client_id] = accuracy
 
+        for client in self.server.clients:
+            client.model.to(self.server.device)
+            client.updates.to(self.server.device)
+
         return accuracies
 
     # Overwrite in subclasses.

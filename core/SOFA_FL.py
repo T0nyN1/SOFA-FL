@@ -404,7 +404,7 @@ class SOFA_FL_Server:
                     if delta_clients.is_floating_point():
                         delta_self = updates_state_dict[key]
                         model_state_dict[key] += delta_self
-                        delta_weights = self.eta * delta_self + (1 - self.eta) * delta_clients
+                        delta_weights = (1 - self.eta) * delta_self + self.eta * delta_clients
                         model_state_dict[key] -= delta_weights
                         updates_state_dict[key] = delta_weights
                     else:
