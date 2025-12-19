@@ -20,7 +20,7 @@ train:
 server:
   n_clients: 20
   comm_rounds: 20
-  eta: 1
+  eta: 0.2
   cluster_type: 'dmac'
   distance_metric: 'euclidean'
   threshold: 0.1 # suggested range for MNIST: [0.01, 0.2]

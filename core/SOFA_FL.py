@@ -89,6 +89,8 @@ class SOFA_FL_Client:
         self.w = None
 
         self.updates = copy.deepcopy(self.model).to(self.device)
+        for p in self.updates.parameters():
+            p.data.zero_()
 
     def __repr__(self):
         return f"<SOFA_FL_Client(id={self.id}, w={self.w}, samples={self.samples()})>"
@@ -117,11 +119,12 @@ class SOFA_FL_Client:
                 losses[k].append(v)
 
         updates = {}
-        for key, value in prev_model.state_dict().items():
-            if value.is_floating_point():
-                updates[key] = value - self.model.state_dict()[key]
-            else:
-                updates[key] = self.model.state_dict()[key]
+        with torch.no_grad():
+            for key, value in prev_model.state_dict().items():
+                if value.is_floating_point():
+                    updates[key] = value - self.model.state_dict()[key]
+                else:
+                    updates[key] = self.model.state_dict()[key]
         return self.id, updates, losses
 
     def evaluate(self):
@@ -310,10 +313,10 @@ class SOFA_FL_Server:
              getattr(client, attr).state_dict().items()}
             for client in clients
         ]
-
-        for key in state_dict.keys():
-            state_dict[key] = torch.sum(torch.stack([client_dict[key] for client_dict in client_state_dicts]), dim=0)
-        model.load_state_dict(state_dict)
+        with torch.no_grad():
+            for key in state_dict.keys():
+                state_dict[key] = torch.sum(torch.stack([client_dict[key] for client_dict in client_state_dicts]), dim=0)
+            model.load_state_dict(state_dict)
         return model
 
     def merge_weights(self, clients):
@@ -323,11 +326,12 @@ class SOFA_FL_Server:
         w_sum = sum(ws)
         ws = [w / w_sum for w in ws]
 
-        for key in state_dict.keys():
-            state_dict[key] = sum(
-                [ws[i] * value if (value := clients[i].model.state_dict()[key]).is_floating_point() else value for i in
-                 range(len(clients))])
-        model.load_state_dict(state_dict)
+        with torch.no_grad():
+            for key in state_dict.keys():
+                state_dict[key] = sum(
+                    [ws[i] * value if (value := clients[i].model.state_dict()[key]).is_floating_point() else value for i in
+                     range(len(clients))])
+            model.load_state_dict(state_dict)
         return model
 
     def copy_weights(self, client):
@@ -383,6 +387,50 @@ class SOFA_FL_Server:
         self.update_clients_dict()
         self._update_snapshots()
 
+    def update_weights(self):
+        # Approach 1: direct successor
+        for node in sorted(self.structure.nodes, key=lambda n: n.level):
+            if node.is_leaf():
+                continue
+            client = self.node_to_client(node)
+            successors_clients = [self.node_to_client(n) for n in node.successors]
+            clients_updates = self.aggregate_weights(successors_clients, attr="updates")
+
+            model_state_dict = client.model.state_dict()
+            updates_state_dict = client.updates.state_dict()
+            with torch.no_grad():
+                for key in model_state_dict.keys():
+                    delta_clients = clients_updates.state_dict()[key]
+                    if delta_clients.is_floating_point():
+                        delta_self = updates_state_dict[key]
+                        model_state_dict[key] += delta_self
+                        delta_weights = self.eta * delta_self + (1 - self.eta) * delta_clients
+                        model_state_dict[key] -= delta_weights
+                        updates_state_dict[key] = delta_weights
+                    else:
+                        model_state_dict[key] += delta_clients
+                        updates_state_dict[key] += delta_clients
+                client.model.load_state_dict(model_state_dict)
+                client.updates.load_state_dict(updates_state_dict)
+
+        # Approach 2: direct successor + leaf clients
+        # for node in sorted(self.structure.nodes, key=lambda n: n.level):
+        #     if node.is_leaf():
+        #         continue
+        #     client = self.node_to_client(node)
+        #     provider_clients = {self.node_to_client(n) for n in node.successors} | {self.node_to_client(n) for n in node.get_leaves()}
+        #     provider_clients = list(provider_clients)
+        #     updates = self.aggregate_weights(provider_clients, attr="updates")
+        #     state_dict = client.model.state_dict()
+        #     for key in state_dict.keys():
+        #         value = updates.state_dict()[key]
+        #         if value.is_floating_point():
+        #             delta_weights = self.eta * value
+        #             state_dict[key] -= delta_weights
+        #         else:
+        #             state_dict[key] += value
+        #     client.model.load_state_dict(state_dict)
+
     def update_clients(self):
         for node in self.shape.log.keys():
             weights = None
@@ -424,29 +472,13 @@ class SOFA_FL_Server:
             self._update_test_data(self.node_to_client(node), successors_clients)
         self._update_ws([self.node_to_client(self.structure.root())])
 
-        for node in sorted(self.structure.nodes, key=lambda n: n.level):
-            if node.is_leaf():
-                continue
-            client = self.node_to_client(node)
-            successors_clients = [self.node_to_client(n) for n in node.successors]
-            updates = self.aggregate_weights(successors_clients, attr="updates")
-            state_dict = client.model.state_dict()
-            for key in state_dict.keys():
-                value = updates.state_dict()[key]
-                if value.is_floating_point():
-                    delta_weights = self.eta * value
-                    state_dict[key] -= delta_weights
-                    client.updates.state_dict()[key] += delta_weights
-                else:
-                    state_dict[key] += value
-                    client.updates.state_dict()[key] += value
-            client.model.load_state_dict(state_dict)
-
         self._update_snapshots()
 
     def sync_client_weights(self, client):
         node = self.client_to_node(client)
-        node.centroid = client.weights_flatten()
+        if node.is_leaf():
+            node.centroid = client.weights_flatten()
+        # node.centroid = client.weights_flatten()
 
     def train(self):
         train_manager = Train_Manager(server=self, logger=self.logger, val=self.cfg["experiment"]["evaluation"])
