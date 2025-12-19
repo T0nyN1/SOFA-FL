@@ -61,7 +61,7 @@ class Base_Manager():
                 continue
 
             id, updates, loss = client.local_update(*self._instantiate_criterion(client))
-            client.updates = updates
+            client.updates.load_state_dict(updates)
             self.server.sync_client_weights(client)
             for k, v in loss.items():
                 losses[k][id] = v
@@ -143,6 +143,8 @@ class Base_Manager():
             self.server.data_share_manager.share()
 
     def _update_clustering(self):
+        self.server.update_weights()
+        self.server.structure.update_attrs()
         self.server.shape.run()
         self.server.update_clients()
         if self.server.data_share:

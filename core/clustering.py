@@ -79,16 +79,6 @@ class Hierarchical_Clustering:
         s = f'<Hierarchical_Clustering(type={self.type}, distance={self.distance_measure.__name__}, threshold={self.threshold}, increment_factor={self.increment_factor})>'
         s += "\nNodes\n" + "\n".join([node.__repr__() for node in sorted(self.nodes, key=lambda n: n.index)])
         return s
-        # s = ''
-        # max_level = max([n.level for n in self.nodes])
-        # for level in range(max_level + 1):
-        #     s += f"Level {level}\n"
-        #     nodes = sorted(self._find_nodes_of_level(level), key=lambda n: n.index)
-        #     if len(nodes) == 0:
-        #         s += str(None)
-        #     for node in nodes:
-        #         s += node.__repr__() + "\n"
-        # return s
 
     def update_nodes_dict(self):
         self.nodes_dict = self.clients_dict = {n.index: i for i, n in enumerate(self.nodes)}
@@ -121,12 +111,6 @@ class Hierarchical_Clustering:
         if type not in clustering.keys():
             raise NotImplementedError("Unknown hierarchical clustering type")
         return clustering[type]
-
-    def update_clients_centroids(self, centroids):
-        clients = self.clients()
-        assert len(centroids) == len(clients)
-        for i, (client, centroid) in enumerate(zip(clients, centroids)):
-            client.centroid = centroid
 
     def _increment_index(self) -> int:
         self.max_index += 1
@@ -182,6 +166,12 @@ class Hierarchical_Clustering:
                 for node in nodes:
                     node.level = current_level
         return "Normalize levels: " + ", ".join(s) if len(s) > 0 else ""
+
+    def update_attrs(self):
+        for node in sorted(self.nodes, key=lambda n: n.level):
+            if node.is_leaf():
+                continue
+            node.centroid, node.samples = self.find_centroid(node.successors)
 
     def dynamic_multi_branch_agglomerative_clustering(self):
         nodes = copy.deepcopy(self.nodes)
@@ -419,8 +409,12 @@ class SHAPE:
         return matches[0] if matches else None
 
     def incoherence(self, node: Cluster_Node):
-        successors = torch.stack([n.centroid for n in node.successors]).to(self.tree.device)
-        D = self.tree.distance_measure(successors, node.centroid.view(1, -1))
+        # TODO: whether to trim cluster with no successors? Why no successors happened here?
+        successors = node.successors
+        if successors is None or len(successors) == 0:
+            return 0
+        successors_weights = torch.stack([n.centroid for n in node.successors]).to(self.tree.device)
+        D = self.tree.distance_measure(successors_weights, node.centroid.view(1, -1))
         D = self.tree._matrix_min_max_normalization(D)
         return torch.mean(D).item()
 
@@ -495,7 +489,7 @@ class SHAPE:
         ancestor = self.find_lowest_common_ancestor(self.tree.root(), parent, predecessor)
         predecessor.successors.remove(child)
         parent.successors.append(child)
-        self._recur_update_attrs(ancestor, predecessor, parent)
+        # self._recur_update_attrs(ancestor, predecessor, parent)
 
     def trim(self, node: Cluster_Node):
         assert len(node.successors) == 1

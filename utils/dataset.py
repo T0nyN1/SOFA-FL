@@ -112,4 +112,4 @@ def _classes_distributions_info(clients, Y):
         full_counts = [int(counts.get(class_id, 0)) for class_id in range(n_classes)]
         table.append([f"Client {cid}"] + full_counts)
 
-    return "\nClasses distributions:\n" + tabulate(table, headers=headers, tablefmt="grid")
+    return "\nClasses distributions:\n" + tabulate(table, headers=headers, tablefmt="outline")
