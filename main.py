@@ -1,7 +1,7 @@
 import argparse
 import pprint
 
-import tabulate
+import tabulate as tab
 import yaml
 from torchvision.models import resnet50, resnet34, resnet18
 
@@ -11,7 +11,7 @@ from core.SOFA_FL import SOFA_FL_Server
 from utils.dataset import *
 from utils.utility import *
 
-tabulate.PRESERVE_WHITESPACE = True
+tab.PRESERVE_WHITESPACE = True
 
 
 def parse_args():
@@ -94,8 +94,8 @@ def print_cfg(cfg, logger):
         if i < len(sections) - 1:
             table_data.append([None, None])
 
-    info = "Configs:\n" + tabulate.tabulate(table_data, headers=["Section", "Parameters"], tablefmt="outline",
-                                            stralign="left")
+    info = "Configs:\n" + tab.tabulate(table_data, headers=["Section", "Parameters"], tablefmt="outline",
+                                       stralign="left")
     logger.info(info)
 
 
