@@ -1,6 +1,7 @@
 import argparse
 import pprint
 
+import tabulate
 import yaml
 from torchvision.models import resnet50, resnet34, resnet18
 
@@ -9,6 +10,8 @@ from backbone.FCNet import FCNet
 from core.SOFA_FL import SOFA_FL_Server
 from utils.dataset import *
 from utils.utility import *
+
+tabulate.PRESERVE_WHITESPACE = True
 
 
 def parse_args():
@@ -65,6 +68,37 @@ def set_device(cfg):
     return cfg['experiment']['device']
 
 
+def print_cfg(cfg, logger):
+    table_data = []
+
+    def flatten_to_strings(d, gap=0):
+        lines = []
+        for k, v in d.items():
+            if isinstance(v, dict):
+                lines.append(f"{k}:")
+                lines.extend(flatten_to_strings(v, gap=gap + 4))
+            else:
+                lines.append(f"{k}: {v}" if gap == 0 else f"{' ' * gap}{k}: {v}")
+        return lines
+
+    for i, section in enumerate(sections := list(cfg.keys())):
+        params = cfg[section]
+        if isinstance(params, dict):
+            formatted_lines = flatten_to_strings(params)
+            for idx, line in enumerate(formatted_lines):
+                display_section = section if idx == 0 else ""
+                table_data.append([display_section, line])
+        else:
+            table_data.append([section, str(params)])
+
+        if i < len(sections) - 1:
+            table_data.append([None, None])
+
+    info = "Configs:\n" + tabulate.tabulate(table_data, headers=["Section", "Parameters"], tablefmt="outline",
+                                            stralign="left")
+    logger.info(info)
+
+
 def main():
     args = parse_args()
 
@@ -73,9 +107,9 @@ def main():
     logger = get_logger(mode, experiment_dir)
     cfg = load_config(args.config)
     cfg['experiment']['experiment_dir'] = experiment_dir
-
     device = set_device(cfg)
-    logger.info(f'Using device: {device}')
+    print("Using device: ", device)
+    print_cfg(cfg, logger)
 
     dataset_func, n_classes = get_dataset(cfg['train']['dataset'])
     if not os.path.exists(args.dataset_dir):
