@@ -1,7 +1,9 @@
+import copy
 import os.path
 from itertools import zip_longest
 
 import imageio.v2 as imageio
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import torch
@@ -54,18 +56,69 @@ class Base_Manager():
                 siblings_weights = [w.to(device) for w in siblings_weights]
         return criterion, siblings_weights, predecessor_weight
 
-    def train_one_round(self):
+    def train_one_round(self, initialize=False):
         losses = {"train_losses": {}, "local_losses": {}, "inter_cluster_losses": {}, "intra_cluster_losses": {}}
-        for client in tqdm(self.server.clients, desc=f"Round {self.round} | Clients local updating: "):
-            if client.samples() == 0:
-                continue
+        losses_results = copy.deepcopy(losses)
 
-            id, updates, loss = client.local_update(*self._instantiate_criterion(client))
-            client.updates.load_state_dict(updates)
-            self.server.sync_client_weights(client)
-            for k, v in loss.items():
-                losses[k][id] = v
-        return losses
+        if initialize:
+            for client in tqdm(self.server.clients, desc=f"Round {self.round} | Initializing"):
+                client.local_update(*self._instantiate_criterion(client))
+                self.server.sync_client_weights(client)
+        else:
+            total_num = sum(
+                [len(n.get_leaves()) for n in self.server.structure.nodes]) + len(
+                [c for c in self.server.clients if c.samples() > 0]) - 2 * self.server.n_clients
+            pbar = tqdm(total=total_num, desc=f"Round {self.round} | Local updating")
+            for level in range(self.server.structure.root().level, 0, -1):
+                map_dict = {}
+                nodes = self.server.structure.find_nodes_of_level(level)
+                clients = [self.server.node_to_client(n) for n in nodes]
+                trainers = []
+                for i in range(len(clients)):
+                    client = clients[i]
+                    leaf_clients = [self.server.node_to_client(n) for n in
+                                    nodes[i].get_leaves()]
+                    trainers += leaf_clients
+                    for key in losses:
+                        losses[key][client.id] = {}
+                        map_dict[client.id] = client.id
+                    for leaf_client in leaf_clients:
+                        leaf_client.model.load_state_dict(client.model.state_dict())
+                        leaf_client.assign_optimizer()
+                        map_dict[leaf_client.id] = client.id
+                trainers += [client for client in clients if client.samples() > 0]
+
+                for client in trainers:
+                    id, updates, loss = client.local_update(*self._instantiate_criterion(client))
+                    client.updates.load_state_dict(updates)
+
+                    for k, v in loss.items():
+                        losses[k][map_dict[id]][client] = v
+
+                    pbar.update(1)
+
+                for client in clients:
+                    self.server.update_weights(client, [self.server.node_to_client(k) for k, v in map_dict.items() if
+                                                        client.id == v])
+                for key in losses:
+                    for client_id, sub_dict in losses[key].items():
+                        lengths = [len(item) for item in sub_dict.values()]
+                        if all(length == lengths[0] for length in lengths):
+                            results = [sum([loss[i] * (
+                                float(trainer.w) * float(self.server.eta) if trainer.id != client_id else (
+                                        1 - self.server.eta.item()))
+                                            for trainer, loss in sub_dict.items()]) for i in range(lengths[0])]
+                        else:
+                            results = [np.mean(loss) * (
+                                float(trainer.w) * float(self.server.eta) if trainer.id != client_id else (
+                                        1 - float(self.server.eta))) for trainer, loss in sub_dict.items()]
+                        losses_results[key][client_id] = results
+
+            pbar.close()
+
+            for client in [self.server.node_to_client(n) for n in self.server.structure.find_nodes_of_level(0)]:
+                self.server.sync_client_weights(client)
+        return losses_results
 
     # TODO: cuda support
     @staticmethod
@@ -84,54 +137,116 @@ class Base_Manager():
 
         return client_id, losses, updated_weights, updates
 
-    def train_one_round_parallel(self):
-        MAX_WORKERS = self.server.cfg['experiment']['num_workers']
-        selected_clients = [client for client in self.server.clients if client.samples() > 0]
-        tasks = []
+    def train_one_round_parallel(self, initialize=False):
+        def prepare(selected_clients):
+            tasks = []
+            for client in selected_clients:
+                client.model.to('cpu')
+                client.updates.to('cpu')
+                client.model.zero_grad(set_to_none=True)
+                client.optimizer = None
 
-        for client in selected_clients:
-            client.model.to('cpu')
-            client.updates.to('cpu')
-            client.model.zero_grad(set_to_none=True)
-            client.optimizer = None
+                if isinstance(client.w, torch.Tensor):
+                    client.w = client.w.cpu()
 
-            if isinstance(client.w, torch.Tensor):
-                client.w = client.w.cpu()
-
-            tasks.append((client, str(self.server.device), *self._instantiate_criterion(client, device='cpu')))
-
-        losses = {"train_losses": {}, "local_losses": {}, "inter_cluster_losses": {}, "intra_cluster_losses": {}}
+                tasks.append((client, str(self.server.device), *self._instantiate_criterion(client, device='cpu')))
+            return tasks
 
         try:
             mp.set_start_method('spawn', force=True)
         except RuntimeError:
             pass
 
-        with mp.Pool(processes=MAX_WORKERS) as pool:
-            results = list(tqdm(
-                pool.imap(self._client_update_task, tasks),
-                total=len(tasks),
-                desc=f"Round {self.round} | Parallel Updating"
-            ))
-
-        for client_id, loss, new_weights, updates in results:
-            for k, v in loss.items():
-                losses[k][client_id] = v
-            target_client = next((c for c in self.server.clients if c.id == client_id), None)
-            if target_client:
-                target_client.model.load_state_dict(new_weights)
-                target_client.updates.load_state_dict(updates)
-                target_client.model.to(self.server.device)  # sent back to gpu, if needed
-                target_client.updates.to(self.server.device)
-                self.server.sync_client_weights(target_client)
-
-        return losses
-
-    def _next_round(self):
-        if self.parallel:
-            losses = self.train_one_round_parallel()
+        MAX_WORKERS = self.server.cfg['experiment']['num_workers']
+        if initialize:
+            tasks = prepare(self.server.clients)
+            with mp.Pool(processes=MAX_WORKERS) as pool:
+                results = list(tqdm(
+                    pool.imap(self._client_update_task, tasks),
+                    total=len(tasks),
+                    desc=f"Round {self.round} | Parallel Initializing"
+                ))
+            for client_id, loss, new_weights, updates in results:
+                target_client = next((c for c in self.server.clients if c.id == client_id), None)
+                if target_client:
+                    target_client.model.load_state_dict(new_weights)
+                    target_client.model.to(self.server.device)
+                    self.server.sync_client_weights(target_client)
+            losses_results = None
         else:
-            losses = self.train_one_round()
+            losses = {"train_losses": {}, "local_losses": {}, "inter_cluster_losses": {}, "intra_cluster_losses": {}}
+            losses_results = copy.deepcopy(losses)
+
+            total_num = sum(
+                [len(n.get_leaves()) for n in self.server.structure.nodes]) + len(
+                [c for c in self.server.clients if c.samples() > 0]) - 2 * self.server.n_clients
+            pbar = tqdm(total=total_num, desc=f"Round {self.round} | Parallel updating")
+
+            for level in range(self.server.structure.root().level, 0, -1):
+                map_dict = {}
+                nodes = self.server.structure.find_nodes_of_level(level)
+                clients = [self.server.node_to_client(n) for n in nodes]
+                trainers = []
+                for i in range(len(clients)):
+                    client = clients[i]
+                    leaf_clients = [self.server.node_to_client(n) for n in
+                                    nodes[i].get_leaves()]
+                    trainers += leaf_clients
+                    for key in losses:
+                        losses[key][client.id] = {}
+                        map_dict[client.id] = client.id
+                    for leaf_client in leaf_clients:
+                        leaf_client.model.load_state_dict(client.model.state_dict())
+                        map_dict[leaf_client.id] = client.id
+                trainers += [client for client in clients if client.samples() > 0]
+
+                tasks = prepare(trainers)
+
+                results = []
+                with mp.Pool(processes=MAX_WORKERS) as pool:
+                    for result in pool.imap(self._client_update_task, tasks):
+                        results.append(result)
+                        pbar.update(1)
+
+                for client_id, loss, new_weights, updates in results:
+                    for k, v in loss.items():
+                        losses[k][map_dict[client_id]][self.server.node_to_client(client_id)] = v
+                    target_client = next((c for c in self.server.clients if c.id == client_id), None)
+                    if target_client:
+                        target_client.model.load_state_dict(new_weights)
+                        target_client.updates.load_state_dict(updates)
+                        target_client.model.to(self.server.device)
+                        target_client.updates.to(self.server.device)
+
+                for client in clients:
+                    self.server.update_weights(client, [self.server.node_to_client(k) for k, v in map_dict.items() if
+                                                        client.id == v])
+                for key in losses:
+                    for client_id, sub_dict in losses[key].items():
+                        lengths = [len(item) for item in sub_dict.values()]
+                        if all(length == lengths[0] for length in lengths):
+                            results = [sum([loss[i] * (
+                                float(trainer.w) * float(self.server.eta) if trainer.id != client_id else (
+                                        1 - self.server.eta.item()))
+                                            for trainer, loss in sub_dict.items()]) for i in range(lengths[0])]
+                        else:
+                            results = [np.mean(loss) * (
+                                float(trainer.w) * float(self.server.eta) if trainer.id != client_id else (
+                                        1 - float(self.server.eta))) for trainer, loss in sub_dict.items()]
+                        losses_results[key][client_id] = results
+
+            pbar.close()
+
+            for client in [self.server.node_to_client(n) for n in self.server.structure.find_nodes_of_level(0)]:
+                self.server.sync_client_weights(client)
+
+        return losses_results
+
+    def _next_round(self, initialize=False):
+        if self.parallel:
+            losses = self.train_one_round_parallel(initialize=initialize)
+        else:
+            losses = self.train_one_round(initialize=initialize)
         return losses
 
     def _init_clustering(self):
@@ -143,7 +258,6 @@ class Base_Manager():
             self.server.data_share_manager.share()
 
     def _update_clustering(self):
-        self.server.update_weights()
         self.server.structure.update_attrs()
         self.server.shape.run()
         self.server.update_clients()
@@ -154,7 +268,11 @@ class Base_Manager():
     def evaluate(self):
         accuracies = {}
         if not self.parallel:
-            for client in tqdm(self.server.clients, desc=f"Evaluation: "):
+            selected_clients = [c for c in self.server.clients if not self.server.client_to_node(c).is_leaf()]
+            if len(selected_clients) == 0:
+                return None
+            for client in tqdm(selected_clients,
+                               desc=f"Evaluation: "):
                 id, accuracy = client.evaluate()
                 accuracies[id] = accuracy
         else:
@@ -185,6 +303,10 @@ class Base_Manager():
         tasks = []
 
         for client in self.server.clients:
+            node = self.server.client_to_node(client)
+            if node.is_leaf():
+                continue
+
             client.model.to('cpu')
             client.updates.to('cpu')
             client.optimizer = None
@@ -255,9 +377,9 @@ class Train_Manager(Base_Manager):
         if warmup_iters is None:
             warmup_iters = 1
             for _ in range(warmup_iters):
-                losses = self._next_round()
-                for k, v in losses.items():
-                    self._update_stats(k, v)
+                losses = self._next_round(initialize=True)
+                # for k, v in losses.items():
+                #     self._update_stats(k, v)
 
     def step(self):
         self.round += 1
@@ -294,7 +416,7 @@ class Train_Manager(Base_Manager):
         self._warm_up()
         if self.val:
             accuracies = self.evaluate()
-            self._update_stats("val_accuracies", accuracies)
+            # self._update_stats("val_accuracies", accuracies)
         self.logger.info("Forming server structure...")
         self._init_clustering()
         if self.save_structure:
@@ -307,7 +429,7 @@ class Train_Manager(Base_Manager):
             self.server.structure.visualize_tree(show=True)
 
         _console_output()
-        for i in range(self.server.comm_rounds - 1):
+        for i in range(self.server.comm_rounds):
             self.step()
             _console_output()
         self.visualize()
@@ -345,7 +467,7 @@ class Train_Manager(Base_Manager):
                     num_updates = len(losses)
 
                     if num_updates > 0:
-                        x_coords = [r_idx + (k + 0.5) / num_updates for k in range(num_updates)]
+                        x_coords = [r_idx + 1 + (k + 0.5) / num_updates for k in range(num_updates)]
 
                         client_x_coords.extend(x_coords)
                         client_y_losses.extend(losses)
@@ -448,7 +570,7 @@ class Train_Manager(Base_Manager):
         fig = go.Figure()
 
         num_rounds = len(val_data_by_round)
-        x_axis_rounds = list(range(num_rounds))
+        x_axis_rounds = list(range(1, num_rounds + 1))
 
         all_client_ids = set()
         for round_data in val_data_by_round:

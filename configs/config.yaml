@@ -5,7 +5,7 @@
 experiment:
   seed: 42
   device: 'auto'
-  parallel_training: true
+  parallel_training: off
   evaluation: on
   num_workers: 4
 
@@ -14,13 +14,13 @@ train:
   dataset: 'mnist'
   optimizer: 'adam'
   local_objective: "cross_entropy"
-  alpha: 0.2
-  beta: 0.2
+  alpha: 0
+  beta: 0
 
 server:
-  n_clients: 20
-  comm_rounds: 20
-  eta: 0.2
+  n_clients: 10
+  comm_rounds: 10
+  eta: 0.8
   cluster_type: 'dmac'
   distance_metric: 'euclidean'
   threshold: 0.1 # suggested range for MNIST: [0.01, 0.2]
@@ -37,9 +37,9 @@ client:
   weight_decay: 0.0001
   batch_size: 100
   local_updates: 1
-  max_iters: null
+  max_iters: 5
   data_share:
-    activate: on
+    activate: off
     mode: "adapt"
     gamma: 5000
     maximum_sharing_ratio: 0.2
@@ -48,11 +48,11 @@ client:
 data:
   iid: false
   alpha: 1
-  in_channels: 784
+  in_channels: 1 # mnist for fcnet: 784
 
 output:
   export_statistics: ["train_losses", "local_losses", "val_accuracies"]
-  show_plots: off # [...]
+  show_plots: ["structure"]
   save_plots: ["structure", "train_losses", "local_losses", "inter_cluster_losses", "intra_cluster_losses", "val_accuracies", "model_distribution"]
   format: "jpg"
   image_size: [1000, 600]

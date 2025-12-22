@@ -314,15 +314,16 @@ class SOFA_FL_Server:
     def aggregate_weights(self, clients, attr="model"):
         model = copy.deepcopy(clients[0].model)
         state_dict = model.state_dict()
-
+        w_sum = sum([c.w for c in clients])
         client_state_dicts = [
-            {k: v.to(self.device) * client.w if v.is_floating_point() else v.to(self.device) for k, v in
+            {k: v.to(self.device) * client.w / w_sum if v.is_floating_point() else v.to(self.device) for k, v in
              getattr(client, attr).state_dict().items()}
             for client in clients
         ]
         with torch.no_grad():
             for key in state_dict.keys():
-                state_dict[key] = torch.sum(torch.stack([client_dict[key] for client_dict in client_state_dicts]), dim=0)
+                state_dict[key] = torch.sum(torch.stack([client_dict[key] for client_dict in client_state_dicts]),
+                                            dim=0)
             model.load_state_dict(state_dict)
         return model
 
@@ -336,7 +337,8 @@ class SOFA_FL_Server:
         with torch.no_grad():
             for key in state_dict.keys():
                 state_dict[key] = sum(
-                    [ws[i] * value if (value := clients[i].model.state_dict()[key]).is_floating_point() else value for i in
+                    [ws[i] * value if (value := clients[i].model.state_dict()[key]).is_floating_point() else value for i
+                     in
                      range(len(clients))])
             model.load_state_dict(state_dict)
         return model
@@ -394,52 +396,21 @@ class SOFA_FL_Server:
         self.update_clients_dict()
         self._update_snapshots()
 
-    def update_weights(self):
-        # Approach 1: direct successor
-        for node in sorted(self.structure.nodes, key=lambda n: n.level):
-            if node.is_leaf():
-                continue
-            client = self.node_to_client(node)
-            successors_clients = [self.node_to_client(n) for n in node.successors]
-            clients_updates = self.aggregate_weights(successors_clients, attr="updates")
-
-            model_state_dict = client.model.state_dict()
-            updates_state_dict = client.updates.state_dict()
-            with torch.no_grad():
-                for key in model_state_dict.keys():
-                    delta_clients = clients_updates.state_dict()[key]
-                    if delta_clients.is_floating_point():
-                        delta_self = updates_state_dict[key]
-                        model_state_dict[key] += delta_self
-                        delta_weights = (1 - self.eta) * delta_self + self.eta * delta_clients
-                        model_state_dict[key] -= delta_weights
-                        updates_state_dict[key] = delta_weights
-                    else:
-                        model_state_dict[key] += delta_clients
-                        updates_state_dict[key] += delta_clients
-                client.model.load_state_dict(model_state_dict)
-                client.updates.load_state_dict(updates_state_dict)
-
-        for client in self.clients:
-            client.reset_updates()
-
-        # Approach 2: direct successor + leaf clients
-        # for node in sorted(self.structure.nodes, key=lambda n: n.level):
-        #     if node.is_leaf():
-        #         continue
-        #     client = self.node_to_client(node)
-        #     provider_clients = {self.node_to_client(n) for n in node.successors} | {self.node_to_client(n) for n in node.get_leaves()}
-        #     provider_clients = list(provider_clients)
-        #     updates = self.aggregate_weights(provider_clients, attr="updates")
-        #     state_dict = client.model.state_dict()
-        #     for key in state_dict.keys():
-        #         value = updates.state_dict()[key]
-        #         if value.is_floating_point():
-        #             delta_weights = self.eta * value
-        #             state_dict[key] -= delta_weights
-        #         else:
-        #             state_dict[key] += value
-        #     client.model.load_state_dict(state_dict)
+    def update_weights(self, client, trainers):
+        clients_updates = self.aggregate_weights(trainers, attr="updates")
+        model_state_dict = client.model.state_dict()
+        updates_state_dict = client.updates.state_dict()
+        with torch.no_grad():
+            for key in model_state_dict.keys():
+                delta_clients = clients_updates.state_dict()[key]
+                if delta_clients.is_floating_point():
+                    delta_self = updates_state_dict[key]
+                    model_state_dict[key] += delta_self
+                    delta_weights = (1 - self.eta) * delta_self + self.eta * delta_clients
+                    model_state_dict[key] -= delta_weights
+                else:
+                    model_state_dict[key] += delta_clients
+            client.model.load_state_dict(model_state_dict)
 
     def update_clients(self):
         for node in self.shape.log.keys():

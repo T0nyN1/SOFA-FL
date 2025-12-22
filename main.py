@@ -35,7 +35,7 @@ def load_config(path="config.yaml"):
     return cfg
 
 
-def get_model(type, in_channels, n_classes):
+def get_model(type, in_channels, n_classes, size=None):
     if type == 'resnet50':
         model = resnet50(num_classes=n_classes)
     if type == 'resnet34':
@@ -45,7 +45,10 @@ def get_model(type, in_channels, n_classes):
     elif type == 'fcnet':
         model = FCNet(in_channels, n_classes)
     elif type == 'convnet':
-        model = ConvNet()
+        model = ConvNet(in_dim=in_channels, out_dim=n_classes)
+        assert size is not None, "Input size must be specified if using ConvNet"
+        dummy = torch.zeros(1, in_channels, *size)
+        model(dummy)
     return model
 
 
@@ -111,14 +114,14 @@ def main():
     print("Using device: ", device)
     print_cfg(cfg, logger)
 
-    dataset_func, n_classes = get_dataset(cfg['train']['dataset'])
+    dataset_func, n_classes, size = get_dataset(cfg['train']['dataset'])
     if not os.path.exists(args.dataset_dir):
         os.mkdir(args.dataset_dir)
     train_set, test_set = dataset_func(args.dataset_dir)
     logger.info(
         f'Dataset loaded! Using dataset: {dataset_func.__name__} | n_classes: {n_classes} | n_train: {len(train_set)} | n_test: {len(test_set)}')
 
-    model = get_model(cfg['train']['model'], cfg['data']['in_channels'], n_classes)
+    model = get_model(cfg['train']['model'], cfg['data']['in_channels'], n_classes, size)
 
     if mode == 'train':
         optimizer = get_optimizer(cfg['train']['optimizer'])
