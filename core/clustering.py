@@ -12,7 +12,7 @@ from scipy.cluster.hierarchy import linkage
 from sklearn.cluster import KMeans
 from tqdm import tqdm
 
-from utils.utility import euclidean_distance, manhattan_distance, union_find_groups
+from utils.utility import euclidean_distance, manhattan_distance, union_find_groups, implicit_fisher_distance
 
 
 class Cluster_Node:
@@ -72,6 +72,8 @@ class Hierarchical_Clustering:
             self.distance_measure = euclidean_distance
         elif distance == 'manhattan':
             self.distance_measure = manhattan_distance
+        elif distance == 'fisher':
+            self.distance_measure = implicit_fisher_distance
         else:
             raise NotImplementedError("Unknown distance measure")
 

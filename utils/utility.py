@@ -59,6 +59,36 @@ def increment_dir(save_dir, name='run'):
     os.makedirs(des, exist_ok=False)
     return des
 
+def implicit_fisher_distance(x: torch.Tensor, y: torch.Tensor = None, eps: float = 1e-8) -> torch.Tensor:
+    if y is None:
+        y = x
+
+    # 1. 维度扩展以利用广播机制
+    # x: (N, 1, D)
+    # y: (1, M, D)
+    x_exp = x.unsqueeze(1)
+    y_exp = y.unsqueeze(0)
+
+    # 2. 计算隐式重要性权重 (基于参数量级)
+    # 逻辑：(|w1| + |w2|) / 2。参数绝对值越大，权重越高。
+    # 结果形状: (N, M, D)
+    weights = (torch.abs(x_exp) + torch.abs(y_exp)) / 2.0
+
+    # 归一化权重，防止 D 维度过大导致距离数值爆炸
+    # 也可以不归一化，取决于你后续聚类的阈值设置
+    weights = weights / (torch.sum(weights, dim=-1, keepdim=True) + eps)
+
+    # 3. 计算加权平方差
+    # (x - y)^2 * weights
+    # 结果形状: (N, M, D)
+    diff_sq = (x_exp - y_exp) ** 2
+    weighted_diff = diff_sq * weights
+
+    # 4. 在参数维度 D 上求和，并开方得到欧式距离
+    # 结果形状: (N, M)
+    dist_matrix = torch.sqrt(torch.sum(weighted_diff, dim=-1) + eps)
+
+    return dist_matrix
 
 def euclidean_distance(x: torch.Tensor, y: torch.Tensor = None) -> torch.Tensor:
     if y is None:
