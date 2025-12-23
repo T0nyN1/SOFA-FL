@@ -8,9 +8,10 @@ from tabulate import tabulate
 def get_dataset(type='mnist'):
     dataset = {'mnist': mnist_datasets, 'cifar10': cifar10_datasets, 'ciphar100': cifar100_datasets}
     classes = {'mnist': 10, 'cifar10': 10, 'cifar100': 100}
+    sizes = {'mnist': (28, 28), 'cifar10': (32, 32), 'cifar100': (32, 32)}
     if type not in dataset.keys():
         raise ValueError('Invalid dataset type.')
-    return dataset[type], classes[type]
+    return dataset[type], classes[type], sizes[type] if type in sizes.keys() else None
 
 
 def mnist_datasets(data_dir='dataset'):
@@ -21,7 +22,6 @@ def mnist_datasets(data_dir='dataset'):
 
 def cifar10_datasets(data_dir='dataset'):
     transform = transforms.Compose([
-        transforms.Resize(224),
         transforms.ToTensor(),
         transforms.Normalize((0.4914, 0.4822, 0.4465),   # mean
                              (0.2470, 0.2435, 0.2616))   # std
