@@ -5,24 +5,24 @@
 experiment:
   seed: 42
   device: 'auto'
-  parallel_training: true
+  parallel_training: off
   evaluation: on
   num_workers: 4
 
 train:
   model: 'convnet'
-  dataset: 'cifar10'
+  dataset: 'mnist'
   optimizer: 'adam'
   local_objective: "cross_entropy"
-  alpha: 0.2
-  beta: 0.2
+  alpha: 5
+  beta: 5
 
 server:
   n_clients: 20
-  comm_rounds: 20
+  comm_rounds: 5
   eta: 0.2
   cluster_type: 'dmac'
-  distance_metric: 'euclidean'
+  distance_metric: 'fisher'
   threshold: 0.1 # suggested range for MNIST: [0.01, 0.2]
   increment_factor: 1.3
   graft_tolerance: 0.1
@@ -39,7 +39,7 @@ client:
   local_updates: 1
   max_iters: null
   data_share:
-    activate: on
+    activate: off
     mode: "adapt"
     gamma: 5000
     maximum_sharing_ratio: 0.2
@@ -48,7 +48,7 @@ client:
 data:
   iid: false
   alpha: 1
-  in_channels: 3
+  in_channels: 1
 
 output:
   export_statistics: ["train_losses", "local_losses", "val_accuracies"]
